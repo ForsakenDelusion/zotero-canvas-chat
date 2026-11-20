@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Canvas Chat",
+  "version": "0.4.12",
+  "description": "Reading canvases in the LLM for Zotero side panel.",
+  "homepage_url": "https://github.com/ForsakenDelusion/zotero-canvas-chat",
+  "applications": {
+    "zotero": {
+      "id": "zotero-canvas-chat@local",
+      "update_url": "https://github.com/ForsakenDelusion/zotero-canvas-chat/releases/latest/download/updates.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}
