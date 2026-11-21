@@ -18,6 +18,7 @@ await rm(addon, { recursive: true, force: true });
 await mkdir(canvas, { recursive: true });
 await writeFile(resolve(addon, "manifest.json"), manifest);
 await copyFile(resolve(root, "addon/bootstrap.js"), resolve(addon, "bootstrap.js"));
+await copyFile(resolve(root, "LICENSE"), resolve(addon, "LICENSE"));
 
 const options = { absWorkingDir: root, bundle: true, target: "firefox115", format: "iife", metafile: true };
 const [host, ui] = await Promise.all([

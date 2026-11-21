@@ -2,13 +2,25 @@
   "name": "zotero-canvas-chat",
   "version": "0.4.22",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ForsakenDelusion/zotero-canvas-chat.git"
+  },
+  "homepage": "https://github.com/ForsakenDelusion/zotero-canvas-chat#readme",
+  "bugs": {
+    "url": "https://github.com/ForsakenDelusion/zotero-canvas-chat/issues"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "check": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "build": "npm run check && node scripts/build.mjs"
+    "build": "npm run check && node scripts/build.mjs",
+    "version:bump": "node scripts/bump-version.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.12.1",

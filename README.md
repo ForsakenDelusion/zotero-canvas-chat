@@ -1,6 +1,10 @@
 # Canvas Chat
 
-[下载安装包](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases)
+[![Latest Release](https://img.shields.io/github/v/release/ForsakenDelusion/zotero-canvas-chat)](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases)
+[![CI](https://github.com/ForsakenDelusion/zotero-canvas-chat/actions/workflows/ci.yml/badge.svg)](https://github.com/ForsakenDelusion/zotero-canvas-chat/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
+[下载安装包](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
 
 **Canvas Chat** 是面向 [LLM-for-Zotero](https://github.com/yilewang/llm-for-zotero) 的独立维护的附属插件。它在同一窗口内把当前论文对话显示为画布，让你基于 PDF 摘录或已有回答继续追问，并把选中的阅读路径整理成带原文跳转的 Zotero 笔记。
 
@@ -23,7 +27,7 @@
 
 </details>
 
-截图取自 Canvas Chat 0.4.22 开发版的 Zotero 界面，问答为演示内容。示例论文为 Sandve 等人（2013）的 [*Ten Simple Rules for Reproducible Computational Research*](https://doi.org/10.1371/journal.pcbi.1003285)（CC BY）。
+截图取自 Zotero 界面，问答为演示内容。示例论文为 Sandve 等人（2013）的 [*Ten Simple Rules for Reproducible Computational Research*](https://doi.org/10.1371/journal.pcbi.1003285)（CC BY）。
 
 ## 目录
 
@@ -39,6 +43,7 @@
 - [模型与运行时配置](#模型与运行时配置)
 - [数据存储与同步](#数据存储与同步)
 - [本地开发与构建](#本地开发与构建)
+- [开源许可](#开源许可)
 
 ## 功能概览
 
@@ -106,7 +111,7 @@ Canvas Chat 与 LLM-for-Zotero 的当前论文会话保持实时同步，支持�
 ## 模型与运行时配置
 
 - **日常问答、分支追问与汇聚**：提问通过当前论文对话的原版输入栏发送，使用 LLM-for-Zotero 当前选中的运行时。可用选项取决于该运行时的配置。
-- **总结生成阅读笔记**：使用官方 LLM-for-Zotero 时，需在画布的 **「模型设置」** 中单独配置笔记整理用的模型。支持 OpenAI 兼容接口、Anthropic 及本地 Ollama。
+- **总结生成阅读笔记**：需在画布的 **「模型设置」** 中配置笔记整理用的模型，支持 OpenAI 兼容接口、Anthropic 及本地 Ollama。
 
 ## 数据存储与同步
 
@@ -121,8 +126,13 @@ Canvas Chat 与 LLM-for-Zotero 的当前论文会话保持实时同步，支持�
 ```sh
 npm ci
 npm run dev    # 启动浏览器开发预览（使用内置演示数据与模拟流式回答）
+npm run check  # TypeScript 类型检查
 npm test       # 运行单元测试
 npm run build  # 构建插件安装包（输出至 dist/）
 ```
 
-Canvas Chat 源码公开供查阅，项目保留自身代码权利。XPI 内附 `THIRD-PARTY-NOTICES.txt`，记录随插件打包的第三方依赖及其许可。
+详细分支、提交与发版约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 开源许可
+
+本项目采用 [GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)](LICENSE) 许可协议，与上游 [LLM-for-Zotero](https://github.com/yilewang/llm-for-zotero) 保持一致。XPI 内附 `LICENSE` 与 `THIRD-PARTY-NOTICES.txt`，记录随插件打包的第三方依赖及其许可。

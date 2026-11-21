@@ -1,0 +1,65 @@
+name: Bug Report
+description: 报告 Canvas Chat 的使用问题或兼容性故障
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 清晰描述发生了什么，以及你的预期行为。
+    validations:
+      required: true
+
+  - type: input
+    id: zotero_version
+    attributes:
+      label: Zotero 版本
+      placeholder: "例如：7.0.32 / 8.0.4"
+    validations:
+      required: true
+
+  - type: input
+    id: llm_version
+    attributes:
+      label: LLM-for-Zotero 版本
+      placeholder: "例如：3.9.20"
+    validations:
+      required: true
+
+  - type: input
+    id: canvas_version
+    attributes:
+      label: Canvas Chat 版本
+      placeholder: "例如：0.4.22"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开某篇文献 PDF
+        2. 点击「画布」
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏后的报错信息 / 控制台日志
+      description: 请勿包含 API Key 或隐私内容。
+      render: text
