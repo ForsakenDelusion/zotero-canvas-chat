@@ -82,7 +82,7 @@ function storage(paper: Zotero.Item) {
       if (!library || !library.editable) throw new Error("当前文库为只读。");
       let note = current();
       if (note?.getNote() !== baseline) throw new Error("画布数据在 Zotero 中已更改。请重启 Zotero 后查看最新版本。");
-      if (!note && !document.cards.length) return;
+      if (!note && !document.cards.length && !document.hiddenTurns?.length) return;
       const payload = encode(zlibSync(strToU8(JSON.stringify(document)), { level: 6 }));
       if (!note) {
         note = new Zotero.Item("note");

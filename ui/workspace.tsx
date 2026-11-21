@@ -262,6 +262,11 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
 
   const active = selected.filter((id) => cards.some((card) => card.id === id));
   const canRemove = !cards.some((card) => selectedSet.has(card.id) && card.importedTurn);
+  const removingNativeBranch = useMemo(() => {
+    const ids = new Set(active);
+    for (const card of cards) if (card.parents.some((parent) => ids.has(parent))) ids.add(card.id);
+    return cards.some((card) => ids.has(card.id) && Boolean(card.nativeBranch));
+  }, [active, cards]);
   const pendingPath = cards.some((card) => path.has(card.id) && card.status === "streaming");
   const connectionText = snapshot.saveError || (snapshot.saved ? "已保存" : "保存中");
   const fit = () => void flow.fitView({ padding: 0.24, duration: 240, maxZoom: 1.05 });
@@ -402,14 +407,18 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     {modal === "settings" && <SettingsDialog value={snapshot.settings} close={close}
       save={(settings, key) => bridge.call({ type: "settings", settings, key })} />}
     {modal === "library" && <LibraryDialog call={bridge.call} close={close} />}
-    {modal === "remove" && <Dialog title="移除选中的卡片" close={close}>
-      <p className="muted">依赖这些卡片的下游分支也会移除。此操作可以撤销。</p>
+    {modal === "remove" && <Dialog title={removingNativeBranch ? "从画布归档移除" : "移除选中的卡片"} close={close}>
+      <p className="muted">
+        {removingNativeBranch
+          ? "仅从画布隐藏并归档，原论文对话中的消息仍会保留；依赖这些卡片的下游分支也会一并移除。此操作可以撤销。"
+          : "依赖这些卡片的下游分支也会移除。此操作可以撤销。"}
+      </p>
       <div className="dialog-actions"><button className="secondary" onClick={close}>取消</button>
         <button className="danger" onClick={() => {
           void act({ type: "remove", ids: active });
           setSelected([]);
           close();
-        }}>移除</button></div>
+        }}>{removingNativeBranch ? "归档移除" : "移除"}</button></div>
     </Dialog>}
   </div>;
 }

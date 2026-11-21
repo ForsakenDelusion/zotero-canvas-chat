@@ -39,7 +39,10 @@ export const cardSchema = position.extend({
 });
 
 export const documentSchema = z.object({
-  version: z.literal(1), cards: z.array(cardSchema).max(1000), viewport: viewportSchema,
+  version: z.literal(1),
+  cards: z.array(cardSchema).max(1000),
+  viewport: viewportSchema,
+  hiddenTurns: z.array(id).max(1000).optional(),
 }).superRefine(({ cards }, context) => {
   const seen = new Set<string>();
   for (const card of cards) {

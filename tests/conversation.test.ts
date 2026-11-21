@@ -209,6 +209,132 @@ test("manual model quotes in the paper chat attach as branches without breaking 
   }
 });
 
+test("archiving native branches records hidden turns across resync, reload, undo, redo, cascade, and streaming", async () => {
+  const paper: Reference = {
+    uri: "zotero://select/library/items/ABCDEFGH",
+    title: "Fixture", authors: "", year: "", abstract: "",
+  };
+  let savedDocument: CanvasDocument | null = null;
+  const makeHost = () => ({
+    paper,
+    load: async () => savedDocument,
+    save: async (document: CanvasDocument) => {
+      savedDocument = structuredClone(documentSchema.parse(document));
+    },
+    getSettings: initialSettings,
+    setSettings: () => {},
+    generate: async function* () {},
+    controller: () => new AbortController(),
+    image: async () => null,
+    open: () => {},
+    search: async () => [],
+    reference: async () => paper,
+    note: async () => "",
+  });
+
+  const turn1 = { id: "40:100", messageIndex: 0, prompt: "First", answer: "AFL uses edge coverage with a 64 KiB bitmap.", sources: [] };
+  const turn2 = { id: "40:200", messageIndex: 2, prompt: "Second", answer: "Right shift distinguishes A->B from B->A.", sources: [] };
+  const branchTurn = {
+    id: "40:300", messageIndex: 4, prompt: "Test branch",
+    quotedTexts: ["Right shift distinguishes A->B from B->A."],
+    answer: "", stopped: true, sources: [],
+  };
+  const childBranchTurn = {
+    id: "40:400", messageIndex: 6, prompt: "Follow-up on branch",
+    answer: "Child branch answer.", sources: [],
+  };
+  const manualBranchTurn = {
+    id: "40:450", messageIndex: 8, prompt: "Manual quote branch",
+    quotedTexts: ["64 KiB bitmap"],
+    answer: "Manual quote answer.", sources: [],
+  };
+  const turn3 = { id: "40:500", messageIndex: 10, prompt: "Third", answer: "Main spine continues.", sources: [] };
+
+  const session = new CanvasSession(makeHost());
+  try {
+    await session.syncConversation([turn1, turn2]);
+    const branchID = await session.submitNativeBranch(["llm:40:200"], "Test branch", "Right shift distinguishes A->B from B->A.", 40,
+      async () => ({ messageIndex: 4 }), () => {});
+    await session.syncConversation([turn1, turn2, branchTurn]);
+
+    await assert.rejects(() => session.command({ type: "retry", id: branchID }), /请在论文对话中重试/);
+
+    const childBranchID = await session.submitNativeBranch([branchID], "Follow-up on branch", undefined, 40,
+      async () => ({ messageIndex: 6 }), () => {});
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn]);
+
+    // Cascade-archiving parent native branch hides both parent and child turns
+    await session.command({ type: "remove", ids: [branchID] });
+    const afterRemove = (await session.ready()).document;
+    assert.ok(!afterRemove.cards.some((card) => card.id === branchID || card.id === childBranchID));
+    assert.deepEqual(afterRemove.hiddenTurns, ["40:300", "40:400"]);
+
+    // Returning to chat and back to canvas does not rebuild archived branches (with or without quotes) or break main spine
+    await session.syncConversation([
+      turn1, turn2, branchTurn,
+      { ...childBranchTurn, quotedTexts: undefined },
+      manualBranchTurn, turn3,
+    ]);
+    const afterResync = (await session.ready()).document;
+    assert.deepEqual(afterResync.cards.map((card) => card.id), ["llm:40:100", "llm:40:200", "llm:40:450", "llm:40:500"]);
+    assert.deepEqual(afterResync.cards.find((card) => card.id === "llm:40:500")?.parents, ["llm:40:200"]);
+
+    // Undo restores both branch cards and clears their hiddenTurns; resync keeps them visible
+    await session.command({ type: "undo" });
+    const afterUndo = (await session.ready()).document;
+    assert.ok(afterUndo.cards.some((card) => card.id === branchID));
+    assert.ok(afterUndo.cards.some((card) => card.id === childBranchID));
+    assert.equal(afterUndo.hiddenTurns, undefined);
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3]);
+    assert.ok((await session.ready()).document.cards.some((card) => card.id === branchID));
+
+    // Redo re-archives both branches and re-records hiddenTurns
+    await session.command({ type: "redo" });
+    assert.deepEqual((await session.ready()).document.hiddenTurns, ["40:300", "40:400"]);
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3]);
+    assert.ok(!(await session.ready()).document.cards.some((card) => card.id === branchID || card.id === childBranchID));
+
+    // Archiving a manual-quote native branch also persists in hiddenTurns
+    await session.command({ type: "remove", ids: ["llm:40:450"] });
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3]);
+    assert.deepEqual((await session.ready()).document.cards.map((card) => card.id), ["llm:40:100", "llm:40:200", "llm:40:500"]);
+    assert.deepEqual((await session.ready()).document.hiddenTurns, ["40:300", "40:400", "40:450"]);
+
+    // Archiving a streaming native branch before nativeTurn is bound stops it and promotes the stopped turn when it arrives
+    let stoppedCount = 0;
+    const streamingID = await session.submitNativeBranch(["llm:40:500"], "Cancelled live", undefined, 40,
+      async () => ({ messageIndex: 12 }), () => { stoppedCount += 1; });
+    await session.command({ type: "remove", ids: [streamingID] });
+    assert.equal(stoppedCount, 1);
+    const stoppedLiveTurn = {
+      id: "40:600", messageIndex: 12, prompt: "Cancelled live",
+      quotedTexts: ["Main spine continues."], answer: "", stopped: true, sources: [],
+    };
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3, stoppedLiveTurn], true);
+    await session.syncConversation([turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3, stoppedLiveTurn]);
+    const afterStreamingArchive = (await session.ready()).document;
+    assert.deepEqual(afterStreamingArchive.cards.map((card) => card.id), ["llm:40:100", "llm:40:200", "llm:40:500"]);
+    assert.deepEqual(afterStreamingArchive.hiddenTurns, ["40:300", "40:400", "40:450", "40:600"]);
+    await session.command({ type: "save" });
+  } finally {
+    await session.close();
+  }
+
+  // Persisted hiddenTurns survive reload into a fresh CanvasSession
+  const reloaded = new CanvasSession(makeHost());
+  try {
+    await reloaded.syncConversation([
+      turn1, turn2, branchTurn, childBranchTurn, manualBranchTurn, turn3,
+      { id: "40:600", messageIndex: 12, prompt: "Cancelled live", quotedTexts: ["Main spine continues."], answer: "", stopped: true, sources: [] },
+    ]);
+    const { document } = await reloaded.ready();
+    assert.deepEqual(document.cards.map((card) => card.id), ["llm:40:100", "llm:40:200", "llm:40:500"]);
+    assert.deepEqual(document.hiddenTurns, ["40:300", "40:400", "40:450", "40:600"]);
+  } finally {
+    await reloaded.close();
+  }
+});
+
 test("settings updates validate endpoints, reset keys on provider change, and reject removed providers", async () => {
   const paper: Reference = {
     uri: "zotero://select/library/items/ABCDEFGH",
