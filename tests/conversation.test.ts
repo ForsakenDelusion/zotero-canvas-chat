@@ -1,8 +1,13 @@
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile, rename } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { strToU8, zlibSync } from "fflate";
 import { ancestors, conversationCards, emptyDocument } from "../shared/graph.ts";
 import { nativeBranchPrompt, readNativePrompt } from "../shared/question.ts";
 import { documentSchema, type CanvasDocument, type Reference } from "../shared/schema.ts";
+import { canvasFilePath, migrateLegacyNotes, zoteroHost } from "../src/library.ts";
 import { CanvasSession, type NativeBranchSubmission } from "../src/session.ts";
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
@@ -405,5 +410,230 @@ test("crystallize delegates note generation to LLM for Zotero, hides utility tur
     assert.deepEqual(afterSync.hiddenTurns, ["50:300"]);
   } finally {
     await session.close();
+  }
+});
+
+test("local file storage persists session operations, migrates legacy notes, and skips redundant viewport snapshots", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "zcanvas-storage-"));
+  const previousZotero = (globalThis as { Zotero?: unknown }).Zotero;
+  const previousPathUtils = (globalThis as { PathUtils?: unknown }).PathUtils;
+  const previousIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+
+  type FakeNote = {
+    id: number;
+    key: string;
+    libraryID: number;
+    parentID: number;
+    deleted: boolean;
+    dateModified?: string;
+    tags: Set<string>;
+    content: string;
+    erased: boolean;
+    isRegularItem: () => boolean;
+    hasTag: (tag: string) => boolean;
+    getNote: () => string;
+    eraseTx: () => Promise<void>;
+  };
+  type FakePaper = {
+    id: number;
+    key: string;
+    libraryID: number;
+    deleted: boolean;
+    noteIDs: number[];
+    isRegularItem: () => boolean;
+    getDisplayTitle: () => string;
+    getCreators: () => { firstName: string; lastName: string }[];
+    getField: (field: string) => string;
+    getNotes: () => number[];
+  };
+
+  const notesById = new Map<number, FakeNote>();
+  const papersById = new Map<number, FakePaper>();
+
+  function makePaper(id: number, key: string, libraryID = 1): FakePaper {
+    const paper: FakePaper = {
+      id,
+      key,
+      libraryID,
+      deleted: false,
+      noteIDs: [],
+      isRegularItem: () => true,
+      getDisplayTitle: () => `Paper ${key}`,
+      getCreators: () => [{ firstName: "Ada", lastName: "Lovelace" }],
+      getField: (field) => field === "date" ? "2026" : "Abstract",
+      getNotes: () => paper.noteIDs.filter((noteId) => !notesById.get(noteId)?.erased),
+    };
+    papersById.set(id, paper);
+    return paper;
+  }
+
+  function addLegacyNote(paper: FakePaper, id: number, content: string, dateModified = "2026-11-21 10:00:00"): FakeNote {
+    const note: FakeNote = {
+      id,
+      key: `NOTE000${id}`,
+      libraryID: paper.libraryID,
+      parentID: paper.id,
+      deleted: false,
+      dateModified,
+      tags: new Set(["_zcanvas_data"]),
+      content,
+      erased: false,
+      isRegularItem: () => false,
+      hasTag: (tag) => note.tags.has(tag),
+      getNote: () => note.content,
+      eraseTx: async () => { note.erased = true; },
+    };
+    Object.defineProperty(note, "parentItem", { get: () => paper });
+    notesById.set(id, note);
+    paper.noteIDs.push(id);
+    return note;
+  }
+
+  function encodeLegacyPayload(document: CanvasDocument): string {
+    const compressed = zlibSync(strToU8(JSON.stringify(document)), { level: 6 });
+    const payload = Buffer.from(compressed).toString("base64");
+    return `<h1>Canvas Chat · 画布数据</h1><p>ZCANVAS1:${payload}</p>`;
+  }
+
+  class FakeSearch {
+    libraryID = 1;
+    private tag?: string;
+    addCondition(field: string, _operator: string, value: string) {
+      if (field === "tag") this.tag = value;
+    }
+    async search() {
+      return [...notesById.values()]
+        .filter((note) => !note.erased && !note.deleted && note.libraryID === this.libraryID && (!this.tag || note.hasTag(this.tag)))
+        .map((note) => note.id);
+    }
+  }
+
+  (globalThis as Record<string, unknown>).PathUtils = {
+    join: (...parts: string[]) => join(...parts),
+  };
+  (globalThis as Record<string, unknown>).IOUtils = {
+    exists: async (path: string) => {
+      try { await stat(path); return true; } catch { return false; }
+    },
+    makeDirectory: async (path: string) => {
+      await mkdir(path, { recursive: true });
+    },
+    readUTF8: async (path: string) => readFile(path, "utf8"),
+    writeUTF8: async (path: string, content: string, options?: { tmpPath?: string }) => {
+      if (options?.tmpPath) {
+        await writeFile(options.tmpPath, content, "utf8");
+        await rename(options.tmpPath, path);
+      } else {
+        await writeFile(path, content, "utf8");
+      }
+      return Buffer.byteLength(content);
+    },
+    remove: async (path: string) => {
+      await rm(path, { force: true });
+    },
+  };
+  (globalThis as Record<string, unknown>).Zotero = {
+    DataDirectory: { dir: dataDir },
+    Schema: { schemaUpdatePromise: Promise.resolve() },
+    Libraries: {
+      userLibraryID: 1,
+      get: (libraryID: number) => libraryID === 1
+        ? { libraryID: 1, libraryType: "user", editable: true }
+        : { libraryID: 2, libraryType: "group", libraryTypeID: 77, editable: false },
+      getAll: () => [
+        { libraryID: 1, libraryType: "user", editable: true },
+        { libraryID: 2, libraryType: "group", libraryTypeID: 77, editable: false },
+      ],
+    },
+    Items: {
+      get: (ids: number[]) => ids.map((id) => notesById.get(id) ?? papersById.get(id)).filter(Boolean),
+      getAsync: async (ids: number[]) => ids.map((id) => notesById.get(id) ?? papersById.get(id)).filter(Boolean),
+    },
+    Search: FakeSearch,
+  };
+
+  const win = { ZoteroPane: { loadURI: () => {} } } as unknown as _ZoteroTypes.MainWindow;
+
+  try {
+    // 1. Fresh paper saves directly to local file without creating Zotero notes
+    const paperA = makePaper(1, "PAPERA01");
+    const fileA = canvasFilePath(paperA as unknown as Zotero.Item);
+    const sessionA = new CanvasSession(zoteroHost(paperA as unknown as Zotero.Item, win));
+    let snapshotEvents = 0;
+    sessionA.subscribe((event) => {
+      if (event.type === "snapshot") snapshotEvents++;
+    });
+    try {
+      await sessionA.addExcerpt({
+        quote: "Local storage excerpt",
+        anchor: { uri: "zotero://open-pdf/library/items/ATTACH01?page=1", page: 1 },
+      });
+      assert.equal(paperA.getNotes().length, 0);
+      const savedOnDisk = documentSchema.parse(JSON.parse(await readFile(fileA, "utf8")));
+      assert.equal(savedOnDisk.cards.length, 1);
+      assert.equal(savedOnDisk.cards[0].quote, "Local storage excerpt");
+
+      // Viewport update while already saved does not emit a redundant snapshot and flushes on close
+      const eventsBeforeViewport = snapshotEvents;
+      await sessionA.command({ type: "viewport", viewport: { x: 120, y: -45, zoom: 1.25 } });
+      assert.equal(snapshotEvents, eventsBeforeViewport);
+    } finally {
+      await sessionA.close();
+    }
+    assert.equal(snapshotEvents, 2); // 1 from update(saved=false), 1 from save(saved=true)
+
+    const reloadedA = new CanvasSession(zoteroHost(paperA as unknown as Zotero.Item, win));
+    try {
+      const snapshot = await reloadedA.ready();
+      assert.equal(snapshot.document.cards.length, 1);
+      assert.deepEqual(snapshot.document.viewport, { x: 120, y: -45, zoom: 1.25 });
+      await reloadedA.command({ type: "remove", ids: [snapshot.document.cards[0].id] });
+    } finally {
+      await reloadedA.close();
+    }
+    await assert.rejects(stat(fileA));
+
+    // 2. Startup migration converts legacy _zcanvas_data notes to local files and erases the notes
+    const paperB = makePaper(2, "PAPERB02");
+    const fileB = canvasFilePath(paperB as unknown as Zotero.Item);
+    const olderDoc: CanvasDocument = {
+      ...emptyDocument(),
+      cards: [{ id: "old-card", parents: [], x: 10, y: 20, kind: "excerpt", title: "Old", quote: "Old quote" }],
+    };
+    const newerDoc: CanvasDocument = {
+      ...emptyDocument(),
+      cards: [
+        { id: "new-card-1", parents: [], x: 30, y: 40, kind: "excerpt", title: "New 1", quote: "New quote 1" },
+        { id: "new-card-2", parents: ["new-card-1"], x: 300, y: 40, kind: "branch", title: "New 2", prompt: "Why?", answer: "Because.", status: "done" },
+      ],
+    };
+    const oldNote = addLegacyNote(paperB, 201, encodeLegacyPayload(olderDoc), "2026-11-20 09:00:00");
+    const newNote = addLegacyNote(paperB, 202, encodeLegacyPayload(newerDoc), "2026-11-21 12:00:00");
+
+    await migrateLegacyNotes();
+    assert.ok(oldNote.erased);
+    assert.ok(newNote.erased);
+
+    const sessionB = new CanvasSession(zoteroHost(paperB as unknown as Zotero.Item, win));
+    try {
+      const { document } = await sessionB.ready();
+      assert.deepEqual(document.cards.map((card) => card.id), ["new-card-1", "new-card-2"]);
+      const migratedOnDisk = documentSchema.parse(JSON.parse(await readFile(fileB, "utf8")));
+      assert.deepEqual(migratedOnDisk.cards.map((card) => card.id), ["new-card-1", "new-card-2"]);
+    } finally {
+      await sessionB.close();
+    }
+
+    // 3. Corrupted legacy note is preserved (not erased) when migration fails
+    const paperC = makePaper(3, "PAPERC03");
+    const corruptedNote = addLegacyNote(paperC, 301, "<h1>Canvas Chat · 画布数据</h1><p>ZCANVAS1:not-valid-zlib</p>");
+    const sessionC = new CanvasSession(zoteroHost(paperC as unknown as Zotero.Item, win));
+    await assert.rejects(sessionC.ready(), /无法读取画布数据笔记/);
+    assert.equal(corruptedNote.erased, false);
+  } finally {
+    (globalThis as Record<string, unknown>).Zotero = previousZotero;
+    (globalThis as Record<string, unknown>).PathUtils = previousPathUtils;
+    (globalThis as Record<string, unknown>).IOUtils = previousIOUtils;
+    await rm(dataDir, { recursive: true, force: true });
   }
 });

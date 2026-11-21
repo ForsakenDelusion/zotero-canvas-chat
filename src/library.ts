@@ -1,9 +1,10 @@
-import { strFromU8, strToU8, unzlibSync, zlibSync } from "fflate";
+import { strFromU8, unzlibSync } from "fflate";
 import { documentSchema, type Anchor, type CanvasDocument } from "../shared/schema";
 import type { CanvasHost } from "./session";
 
 const storageTag = "_zcanvas_data";
-const marker = "ZCANVAS1:";
+const storageDir = "zotero-canvas-chat";
+const fileLocks = new Map<string, Promise<unknown>>();
 const encode = (bytes: Uint8Array) => {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 16384) {
@@ -44,50 +45,132 @@ function reference(item: Zotero.Item) {
   };
 }
 
-function storage(paper: Zotero.Item) {
-  let baseline: string | undefined;
-  function current() {
-    const notes = Zotero.Items.get(paper.getNotes()).filter((note) => note.hasTag(storageTag) && !note.deleted);
-    if (notes.length > 1) throw new Error("找到多条画布数据笔记。请先在 Zotero 中处理同步冲突。");
-    return notes[0];
+function canvasDir() {
+  return PathUtils.join(Zotero.DataDirectory.dir, storageDir);
+}
+
+export function canvasFilePath(paper: Zotero.Item) {
+  const library = Zotero.Libraries.get(paper.libraryID);
+  const scope = library && library.libraryType === "group" ? `group-${library.libraryTypeID}` : "library";
+  return PathUtils.join(canvasDir(), `${scope}-${paper.key}.json`);
+}
+
+function withFileLock<T>(file: string, action: () => Promise<T>): Promise<T> {
+  const previous = fileLocks.get(file) ?? Promise.resolve();
+  const current = previous.then(action, action);
+  const settled = current.then(() => undefined, () => undefined);
+  fileLocks.set(file, settled);
+  void settled.then(() => {
+    if (fileLocks.get(file) === settled) fileLocks.delete(file);
+  });
+  return current;
+}
+
+function legacyNotes(paper: Zotero.Item) {
+  if (typeof paper.getNotes !== "function") return [];
+  return Zotero.Items.get(paper.getNotes()).filter((note) => note.hasTag(storageTag) && !note.deleted);
+}
+
+function parseLegacyNote(content: string): CanvasDocument {
+  const encoded = content.match(/ZCANVAS1:([A-Za-z0-9+/=]+)/)?.[1];
+  if (!encoded) throw new Error("画布数据笔记格式无效。");
+  try {
+    const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    return documentSchema.parse(JSON.parse(strFromU8(unzlibSync(bytes))));
+  } catch {
+    throw new Error("无法读取画布数据笔记，请检查它是否损坏。");
   }
+}
+
+async function removeLegacyNotes(paper: Zotero.Item, notes = legacyNotes(paper)) {
+  if (!notes.length) return;
+  const library = Zotero.Libraries.get(paper.libraryID);
+  if (!library || !library.editable) return;
+  for (const note of notes) {
+    if (typeof note.eraseTx === "function") await note.eraseTx();
+  }
+}
+
+async function writeCanvasFile(file: string, document: CanvasDocument) {
+  if (!document.cards.length && !document.hiddenTurns?.length) {
+    if (await IOUtils.exists(file)) await IOUtils.remove(file, { ignoreAbsent: true });
+    return;
+  }
+  await IOUtils.makeDirectory(canvasDir(), { ignoreExisting: true });
+  await IOUtils.writeUTF8(file, JSON.stringify(document), { tmpPath: `${file}.tmp` });
+}
+
+export function storage(paper: Zotero.Item) {
+  const file = canvasFilePath(paper);
   return {
-    async load() {
-      const note = current();
-      if (!note) return null;
-      baseline = note.getNote();
-      const encoded = baseline.match(/ZCANVAS1:([A-Za-z0-9+/=]+)/)?.[1];
-      if (!encoded) throw new Error("画布数据笔记格式无效。");
-      try {
-        const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-        return documentSchema.parse(JSON.parse(strFromU8(unzlibSync(bytes))));
-      } catch {
-        throw new Error("无法读取画布数据笔记，请检查它是否损坏。");
-      }
+    load() {
+      return withFileLock(file, async () => {
+        if (await IOUtils.exists(file)) {
+          let document: CanvasDocument;
+          try {
+            document = documentSchema.parse(JSON.parse(await IOUtils.readUTF8(file)));
+          } catch {
+            throw new Error("无法读取本地画布数据，请检查数据文件是否损坏。");
+          }
+          await removeLegacyNotes(paper).catch(() => undefined);
+          return document;
+        }
+        const notes = [...legacyNotes(paper)].sort((a, b) =>
+          String((b as { dateModified?: string }).dateModified ?? "")
+            .localeCompare(String((a as { dateModified?: string }).dateModified ?? "")));
+        if (!notes.length) return null;
+        let document: CanvasDocument | undefined;
+        let lastError: unknown;
+        for (const note of notes) {
+          try {
+            document = parseLegacyNote(note.getNote());
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (!document) throw lastError;
+        try {
+          await writeCanvasFile(file, document);
+        } catch {
+          throw new Error("Zotero 无法保存画布数据。");
+        }
+        await removeLegacyNotes(paper, notes).catch(() => undefined);
+        return document;
+      });
     },
-    async save(document: CanvasDocument) {
-      const library = Zotero.Libraries.get(paper.libraryID);
-      if (!library || !library.editable) throw new Error("当前文库为只读。");
-      let note = current();
-      if (note?.getNote() !== baseline) throw new Error("画布数据在 Zotero 中已更改。请重启 Zotero 后查看最新版本。");
-      if (!note && !document.cards.length && !document.hiddenTurns?.length) return;
-      const payload = encode(zlibSync(strToU8(JSON.stringify(document)), { level: 6 }));
-      if (!note) {
-        note = new Zotero.Item("note");
-        note.libraryID = paper.libraryID;
-        note.parentID = paper.id;
-        note.addTag(storageTag);
-      }
-      note.setNote(`<h1>Canvas Chat · 画布数据</h1><p>${marker}${payload}</p>`);
-      try {
-        await note.saveTx();
-        baseline = note.getNote();
-      } catch {
-        if (note.id && baseline) note.setNote(baseline);
-        throw new Error("Zotero 无法保存画布数据。");
-      }
+    save(document: CanvasDocument) {
+      return withFileLock(file, async () => {
+        try {
+          await writeCanvasFile(file, document);
+        } catch {
+          throw new Error("Zotero 无法保存画布数据。");
+        }
+        await removeLegacyNotes(paper).catch(() => undefined);
+      });
     },
   };
+}
+
+export async function migrateLegacyNotes() {
+  await (Zotero as typeof Zotero & { Schema?: { schemaUpdatePromise?: Promise<void> } }).Schema?.schemaUpdatePromise;
+  const libraries = Zotero.Libraries.getAll?.() ?? [];
+  for (const library of libraries) {
+    const search = Object.assign(new Zotero.Search(), { libraryID: library.libraryID });
+    search.addCondition("tag", "is", storageTag);
+    const ids = await search.search();
+    if (!ids.length) continue;
+    const items = await Zotero.Items.getAsync(ids);
+    const papers = new Map<number, Zotero.Item>();
+    for (const item of items) {
+      if (item.deleted) continue;
+      const paper = parentPaper(item);
+      if (paper && legacyNotes(paper).length) papers.set(paper.id, paper);
+    }
+    for (const paper of papers.values()) {
+      await storage(paper).load().catch(() => undefined);
+    }
+  }
 }
 
 function noteBody(text: string) {
@@ -160,6 +243,8 @@ export function zoteroHost(paper: Zotero.Item, win: _ZoteroTypes.MainWindow): Ca
       return reference(item);
     },
     async note(text, sources) {
+      const library = Zotero.Libraries.get(paper.libraryID);
+      if (!library || !library.editable) throw new Error("当前文库为只读。");
       const links = sources.map(({ label, uri }) => `<li><a href="${escape(uri)}">${escape(label)}</a></li>`).join("");
       const note = Object.assign(new Zotero.Item("note"), { libraryID: paper.libraryID });
       note.parentID = paper.id;

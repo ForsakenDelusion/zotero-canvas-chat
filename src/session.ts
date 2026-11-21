@@ -85,6 +85,8 @@ export class CanvasSession {
     clearTimeout(this.queuedSave);
     this.queuedSave = undefined;
     const document = this.document;
+    const previousSaved = this.saved;
+    const previousError = this.saveError;
     try {
       await this.host.save(document);
       this.saved = document === this.document;
@@ -93,7 +95,9 @@ export class CanvasSession {
       this.saved = false;
       this.saveError = errorMessage(error).slice(0, 1000);
     }
-    this.emit();
+    if (this.saved !== previousSaved || this.saveError !== previousError) {
+      this.emit();
+    }
   }
 
   private scheduleSave() {
@@ -447,10 +451,13 @@ export class CanvasSession {
           this.update(this.document.cards.map((card) => ({ ...card, ...positions.get(card.id) })));
           break;
         }
-        case "viewport":
+        case "viewport": {
+          const current = this.document.viewport;
+          if (current.x === command.viewport.x && current.y === command.viewport.y && current.zoom === command.viewport.zoom) return;
           this.document = { ...this.document, viewport: command.viewport };
           if (this.document.cards.length || this.document.hiddenTurns?.length) this.scheduleSave();
           return;
+        }
         case "remove": {
           const ids = new Set(command.ids);
           for (const card of this.document.cards) if (card.parents.some((parent) => ids.has(parent))) ids.add(card.id);
@@ -514,8 +521,10 @@ export class CanvasSession {
     for (const job of this.nativeJobs.values()) clearTimeout(job.timeout);
     this.nativeJobs.clear();
     this.listeners.clear();
+    const pendingSave = Boolean(this.queuedSave) || !this.saved;
     clearTimeout(this.queuedSave);
-    if (!this.saved) await this.serial(() => this.save());
+    this.queuedSave = undefined;
+    if (pendingSave) await this.serial(() => this.save());
   }
 }
 
