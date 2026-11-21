@@ -1,7 +1,6 @@
 import { strFromU8, strToU8, unzlibSync, zlibSync } from "fflate";
 import { defaultSettings, documentSchema, settingsSchema, type Anchor, type CanvasDocument, type Settings } from "../shared/schema";
 import { modelStream } from "./model";
-import { companionAvailable, companionStream } from "./companion";
 import type { CanvasHost } from "./session";
 
 const preference = "extensions.zotero-canvas-chat.";
@@ -50,10 +49,7 @@ function reference(item: Zotero.Item) {
 function readSettings() {
   const parsed = settingsSchema.safeParse(Object.fromEntries(Object.keys(defaultSettings)
     .map((name) => [name, Zotero.Prefs.get(preference + name, true) ?? defaultSettings[name as keyof Settings]])));
-  const settings = parsed.success ? parsed.data : defaultSettings;
-  if (settings.provider === "llm-for-zotero" && !companionAvailable()) return defaultSettings;
-  return !settings.model && settings.provider === "compatible" && companionAvailable()
-    ? { ...settings, provider: "llm-for-zotero" as const } : settings;
+  return parsed.success ? parsed.data : defaultSettings;
 }
 
 function readKey() {
@@ -149,19 +145,16 @@ export function zoteroHost(paper: Zotero.Item, win: _ZoteroTypes.MainWindow): Ca
     paper: reference(paper),
     ...storage(paper),
     getSettings: () => ({ ...readSettings(), hasKey: !!readKey() }),
-    companionAvailable,
     setSettings(settings, key) {
       for (const [name, value] of Object.entries(settings)) Zotero.Prefs.set(preference + name, value, true);
       if (key !== undefined) Zotero.Prefs.set(preference + "apiKey", key.trim(), true);
     },
     generate(system, messages, signal) {
       const settings = readSettings();
-      if (!settings.model && settings.provider !== "llm-for-zotero") {
+      if (!settings.model) {
         throw new Error("请在画布的「模型设置」中配置模型，再重试。");
       }
-      const request = { system, messages, signal };
-      return settings.provider === "llm-for-zotero" ? companionStream(request)
-        : modelStream(settings, readKey(), request, win.fetch.bind(win));
+      return modelStream(settings, readKey(), { system, messages, signal }, win.fetch.bind(win));
     },
     controller: () => new win.AbortController(),
     async image(anchor) {

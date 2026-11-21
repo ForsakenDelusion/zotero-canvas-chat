@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowUpRight, BookMarked, Search, X } from "lucide-react";
+import { ArrowUpRight, BookMarked, ChevronDown, Search, X } from "lucide-react";
 import type { Reference, Settings, Snapshot } from "../shared/schema";
 import type { Bridge } from "./bridge";
 
@@ -22,18 +22,16 @@ const endpoints: Record<Settings["provider"], string> = {
   compatible: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
   ollama: "http://127.0.0.1:11434/v1",
-  "llm-for-zotero": "",
 };
 
-export function SettingsDialog({ value, companionAvailable, close, save }: {
-  value: Snapshot["settings"]; companionAvailable?: boolean; close: () => void; save: (settings: Settings, key?: string) => Promise<void>;
+export function SettingsDialog({ value, close, save }: {
+  value: Snapshot["settings"]; close: () => void; save: (settings: Settings, key?: string) => Promise<void>;
 }) {
   const [settings, setSettings] = useState<Settings>(value);
   const [key, setKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const companion = settings.provider === "llm-for-zotero";
   async function submit(event: FormEvent) {
     event.preventDefault();
     setPending(true);
@@ -44,17 +42,20 @@ export function SettingsDialog({ value, companionAvailable, close, save }: {
   }
   return <Dialog title="模型设置" close={close}>
     <form onSubmit={(event) => void submit(event)}>
-      <label>服务商<select value={settings.provider} onChange={(event) => {
-        const provider = event.target.value as Settings["provider"];
-        setSettings({ ...settings, provider, endpoint: endpoints[provider] });
-        if (value.hasKey) setClearKey(true);
-      }}>
-        {(companionAvailable || companion) && <option value="llm-for-zotero">LLM for Zotero{companionAvailable ? "" : "（联动版未启用）"}</option>}
-        <option value="compatible">OpenAI 兼容（含 OpenRouter）</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="ollama">Ollama</option>
-      </select></label>
-      {companion ? <p className="muted field-note">画布联动需要 LLM for Zotero 的默认 API 模型。主对话使用 Antigravity 时，请在这里选择 API 服务商并配置画布模型。</p> : <>
+      <label>服务商
+        <span className="provider-picker">
+          <select value={settings.provider} onChange={(event) => {
+            const provider = event.target.value as Settings["provider"];
+            setSettings({ ...settings, provider, endpoint: endpoints[provider] });
+            if (value.hasKey) setClearKey(true);
+          }}>
+            <option value="compatible">OpenAI 兼容（含 OpenRouter）</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <ChevronDown className="provider-chevron" size={15} aria-hidden="true" />
+        </span>
+      </label>
       <label>服务地址<input value={settings.endpoint} required maxLength={2048}
         onChange={(event) => {
           setSettings({ ...settings, endpoint: event.target.value });
@@ -67,8 +68,7 @@ export function SettingsDialog({ value, companionAvailable, close, save }: {
         onChange={(event) => { setKey(event.target.value); setClearKey(false); }} /></label>
       {value.hasKey && <label className="checkbox-line"><input type="checkbox" checked={clearKey}
         onChange={(event) => setClearKey(event.target.checked)} />清除已保存的密钥</label>}
-      </>}
-      <p className="muted field-note">提问时，选中路径的内容和论文摘要会发送到此模型服务。</p>
+      <p className="muted field-note">总结所选卡片为笔记时，选中路径的内容和论文摘要会发送到此模型服务。</p>
       {error && <p className="card-error" role="alert">{error}</p>}
       <div className="dialog-actions"><button className="primary" disabled={pending}>保存设置</button></div>
     </form>

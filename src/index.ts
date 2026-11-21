@@ -1,10 +1,10 @@
 import { conversationCards } from "../shared/graph";
 import { errorMessage, requestSchema, type Excerpt, type Snapshot } from "../shared/schema";
 import { hostColors, type CanvasTheme } from "../shared/theme";
-import { companionGlobals, turnSchema } from "./companion";
 import { makeAnchor, parentPaper, zoteroHost } from "./library";
-import { askConversation, observeConversation } from "./llm-turn";
+import { askConversation, conversationAt, observeConversation } from "./llm-turn";
 import { watchLLMWindows } from "./llm-window";
+import { nativeCitations } from "./native-citations";
 import { nativeComposer } from "./native-composer";
 import { readerHooks } from "./reader";
 import { CanvasSession } from "./session";
@@ -44,6 +44,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   let pendingFocus: { type: "focus"; id: string } | undefined;
   let conversationKey = 0;
   let turnIDs = new Set<string>();
+  let branchTurns = new Map<string, string>();
   let visibleIDs = new Set<string>();
   let syncing: Promise<void> = Promise.resolve();
   let connected = true;
@@ -69,7 +70,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   if (themeRoot && themeRoot !== root) themeObserver.observe(themeRoot, themeAttributes);
   darkMode?.addEventListener("change", sendTheme);
   const project = (snapshot: Snapshot): Snapshot => {
-    const cards = conversationCards(snapshot.document.cards, turnIDs, conversationKey);
+    const cards = conversationCards(snapshot.document.cards, turnIDs, conversationKey, new Set(branchTurns.keys()));
     visibleIDs = new Set(cards.map((card) => card.id));
     return { ...snapshot, conversationKey, document: { ...snapshot.document, cards } };
   };
@@ -82,13 +83,24 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   const composer = nativeComposer(container, iframe, paper.id, session, (request, draft) => {
     if (connected) port?.postMessage({ event: { type: "composerClosed", request, draft } });
   });
+  const citations = nativeCitations(container, iframe, paper.id, (event) => {
+    if (connected) port?.postMessage({ event });
+  });
   const stopObserving = observeConversation(container, paper.id, (key, turns, partial) => {
     const entries = turns.map((turn) => ({
       id: `${key}:${turn.timestamp}`, prompt: turn.question || "论文对话", answer: turn.answer,
-      sources: sourceAnchors(paper, turn.sources), stopped: turn.stopped, branchID: turn.branchID,
+      sources: sourceAnchors(paper, turn.sources), messageIndex: turn.messageIndex,
+      stopped: turn.stopped, branchID: turn.branchID,
     }));
-    if (!partial || conversationKey !== key) turnIDs = new Set(entries.map((turn) => turn.id));
-    else for (const turn of entries) turnIDs.add(turn.id);
+    if (conversationKey !== key) citations.reset();
+    if (!partial || conversationKey !== key) {
+      turnIDs = new Set();
+      branchTurns = new Map();
+    }
+    for (const turn of entries) {
+      turnIDs.add(turn.id);
+      if (turn.branchID) branchTurns.set(turn.branchID, turn.id);
+    }
     conversationKey = key;
     syncing = session.syncConversation(entries, partial).then(async () => {
       if (!port || !connected) return;
@@ -118,10 +130,26 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
         } else if (command.type === "askConversation") {
           askConversation(container, paper.id, command.key, command.prompt);
         } else if (command.type === "openComposer") {
+          if (conversationKey && conversationAt(container, paper.id)?.key !== conversationKey) {
+            throw new Error("当前论文对话已切换。请重新打开提问框。");
+          }
           if (command.parents.some((id) => !visibleIDs.has(id))) throw new Error("来源卡片已不在当前画布。");
+          citations.dismiss();
           value = composer.open(command);
         } else if (command.type === "closeComposer") {
           composer.close(command.request);
+        } else if (command.type === "readCitedAnswer") {
+          const key = conversationKey;
+          await syncing;
+          const snapshot = await session.ready();
+          const card = snapshot.document.cards.find((entry) => entry.id === command.id);
+          const turn = card?.importedTurn ?? branchTurns.get(command.id);
+          value = connected && key === conversationKey && visibleIDs.has(command.id) && turn
+            ? citations.read(turn) : null;
+        } else if (command.type === "openAnswerCitation") {
+          citations.open(command);
+        } else if (command.type === "closeAnswerCitation") {
+          citations.dismiss(command.prefix);
         } else value = await session.command(command);
         reply.postMessage({ id, ok: true, value });
       } catch (error) {
@@ -141,6 +169,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
     if (!mounts.delete(detach)) return;
     connected = false;
     composer.close();
+    citations.reset();
     win.clearTimeout(timer);
     stopObserving();
     themeObserver.disconnect();
@@ -156,16 +185,6 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   return unmount;
 }
 
-async function acceptTurn(input: unknown) {
-  const turn = turnSchema.parse(input);
-  const paper = parentPaper(Zotero.Items.get(turn.itemID));
-  if (!paper) throw new Error("找不到这条回答对应的文献。");
-  await sessionFor(paper).importTurn({
-    id: `${turn.conversationKey}:${turn.timestamp}`, prompt: turn.question || "导入的回答",
-    answer: turn.answer, sources: sourceAnchors(paper, turn.sources),
-  });
-}
-
 function sourceAnchors(paper: Zotero.Item, entries: { attachmentID: number; pageIndex: number }[]) {
   const sources = new Map<string, ReturnType<typeof makeAnchor>>();
   for (const source of entries) {
@@ -177,24 +196,23 @@ function sourceAnchors(paper: Zotero.Item, entries: { attachmentID: number; page
   return [...sources.values()];
 }
 
+function llmForZoteroInstalled() {
+  return Boolean((Zotero as typeof Zotero & { LLMForZotero?: unknown }).LLMForZotero);
+}
+
 function openFromReader(paper: Zotero.Item, excerpt?: Excerpt) {
   void (async () => {
-    const api = companionGlobals().LLMForZotero?.api?.canvas;
-    if (api?.openPaper) await api.openPaper(paper.id);
-    else await injectedUI?.openPaper(paper.id);
+    await injectedUI?.openPaper(paper.id);
     if (excerpt) await sessionFor(paper).addExcerpt(excerpt, true);
   })().catch((error) => Zotero.getMainWindow()?.alert(errorMessage(error)));
 }
 
 export function startup(id: string) {
-  const receiver = { version: 2 as const, acceptTurn, mountPaper };
-  companionGlobals().ZoteroCanvasChat = receiver;
-  injectedUI = watchLLMWindows(receiver);
-  unregisterReader = readerHooks(id, openFromReader, () => !!companionGlobals().LLMForZotero);
+  injectedUI = watchLLMWindows({ mountPaper });
+  unregisterReader = readerHooks(id, openFromReader, llmForZoteroInstalled);
 }
 
 export async function shutdown() {
-  delete companionGlobals().ZoteroCanvasChat;
   unregisterReader?.();
   injectedUI?.dispose();
   injectedUI = undefined;

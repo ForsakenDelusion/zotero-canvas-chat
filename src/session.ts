@@ -2,7 +2,7 @@ import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPositio
 import { nativeBranchPrompt } from "../shared/question";
 import {
   defaultSettings, documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
-  type Command, type ConversationTurn, type Event, type Excerpt, type ImportedTurn, type Reference, type Settings, type Snapshot,
+  type Command, type ConversationTurn, type Event, type Excerpt, type Reference, type Settings, type Snapshot,
 } from "../shared/schema";
 import { modelEndpoint } from "./model";
 
@@ -11,7 +11,6 @@ export interface CanvasHost {
   load(): Promise<CanvasDocument | null>;
   save(document: CanvasDocument): Promise<void>;
   getSettings(): Settings & { hasKey: boolean };
-  companionAvailable?(): boolean;
   setSettings(settings: Settings, key?: string): void;
   generate(system: string, messages: Message[], signal: AbortSignal): AsyncIterable<string>;
   controller(): AbortController;
@@ -59,7 +58,6 @@ export class CanvasSession {
       undo: this.previous.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
       redo: this.next.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
       settings: this.host.getSettings(),
-      companionAvailable: this.host.companionAvailable?.(),
       saved: this.saved,
       saveError: this.saveError,
     };
@@ -147,46 +145,35 @@ export class CanvasSession {
     });
   }
 
-  importTurn(turn: ImportedTurn) {
-    return this.serial(async () => {
-      if (this.disposed) throw new Error("画布已关闭。");
-      let card = this.document.cards.find((entry) => entry.importedTurn === turn.id);
-      if (!card) {
-        card = this.newCard({
-          kind: "response", importedTurn: turn.id, title: turn.prompt.slice(0, 80),
-          prompt: turn.prompt, answer: turn.answer, sources: turn.sources, status: "done",
-        }, []);
-        this.update([...this.document.cards, card]);
-      }
-      this.emit({ type: "focus", id: card.id });
-      if (!this.saved) await this.save();
-      if (this.saveError) throw new Error(this.saveError);
-    });
-  }
-
   syncConversation(turns: ConversationTurn[], partial = false) {
     return this.serial(() => {
       if (this.disposed || !turns.length) return;
       const nativeBranches = new Map(this.document.cards.filter((card) => card.nativeBranch).map((card) => [card.id, card]));
       for (const turn of turns) {
         const branch = turn.branchID && nativeBranches.get(turn.branchID);
-        if (!branch || branch.prompt !== turn.prompt) continue;
+        if (!branch) continue;
         const status = turn.stopped ? "stopped" : "done";
         const nativeBranch = Number(turn.id.split(":", 1)[0]) || branch.nativeBranch;
         if (branch.answer === turn.answer && branch.status === status && branch.nativeBranch === nativeBranch &&
+            branch.prompt === turn.prompt &&
             JSON.stringify(branch.sources ?? []) === JSON.stringify(turn.sources)) continue;
-        this.finishNativeBranch(branch.id, { answer: turn.answer, sources: turn.sources, status, nativeBranch });
+        this.finishNativeBranch(branch.id, {
+          title: turn.prompt.slice(0, 80), prompt: turn.prompt, answer: turn.answer,
+          sources: turn.sources, status, nativeBranch,
+        });
       }
       if (partial) return;
       const existing = this.document.cards;
       const byTurn = new Map(existing.filter((card) => card.importedTurn).map((card) => [card.importedTurn, card]));
+      const responses = turns.filter((turn) => !turn.branchID || !nativeBranches.has(turn.branchID));
+      const firstNewResponse = responses[responses.findLastIndex((turn) => byTurn.has(turn.id)) + 1];
       const synced: Card[] = [];
       const added: Card[] = [];
-      for (const turn of turns) {
-        if (turn.branchID && nativeBranches.get(turn.branchID)?.prompt === turn.prompt) continue;
-        const current = byTurn.get(turn.id);
-        if (!current && existing.length + added.length >= 1000) continue;
+      for (const turn of responses) {
         const previous = synced.at(-1);
+        const current = byTurn.get(turn.id) ??
+          (turn === firstNewResponse ? replacedResponse(byTurn.values(), turn, previous) : undefined);
+        if (!current && existing.length + added.length >= 1000) continue;
         const position = current ?? (previous
           ? { x: previous.x, y: previous.y + 420 }
           : nextPosition(existing, []));
@@ -197,10 +184,10 @@ export class CanvasSession {
         }
         const updated: Card = {
           id: current?.id ?? `llm:${turn.id}`,
-          x, y, kind: "response", importedTurn: turn.id,
+          x, y, kind: "response", importedTurn: turn.id, messageIndex: turn.messageIndex,
           parents: previous ? [previous.id] : [],
           title: turn.prompt.slice(0, 80), prompt: turn.prompt, answer: turn.answer,
-          sources: turn.sources.length ? turn.sources : current?.sources ?? [],
+          sources: turn.sources.length || current?.importedTurn !== turn.id ? turn.sources : current.sources ?? [],
           status: turn.stopped ? "stopped" : "done",
         };
         if (!current) added.push(updated);
@@ -440,12 +427,6 @@ export class CanvasSession {
           break;
         }
         case "settings": {
-          if (command.settings.provider === "llm-for-zotero") {
-            if (!this.host.companionAvailable?.()) throw new Error("请安装支持画布的 LLM for Zotero 联动版。");
-            this.host.setSettings(command.settings);
-            this.emit();
-            return;
-          }
           const endpoint = modelEndpoint(command.settings);
           const current = this.host.getSettings();
           let changed = current.provider !== command.settings.provider;
@@ -473,6 +454,21 @@ export class CanvasSession {
     clearTimeout(this.queuedSave);
     if (!this.saved) await this.serial(() => this.save());
   }
+}
+
+function replacedResponse(cards: Iterable<Card>, turn: ConversationTurn, previous?: Card) {
+  if (turn.messageIndex === undefined) return;
+  const [key, timestamp] = turn.id.split(":");
+  const previousTimestamp = Number(previous?.importedTurn?.split(":")[1] ?? 0);
+  const candidates = [...cards].filter((card) => {
+    const [oldKey, oldTimestamp] = card.importedTurn!.split(":");
+    return oldKey === key && Number(oldTimestamp) > previousTimestamp && Number(oldTimestamp) < Number(timestamp) &&
+      (previous ? card.parents.length === 1 && card.parents[0] === previous.id : card.parents.length === 0);
+  });
+  const indexed = candidates.filter((card) => card.messageIndex === turn.messageIndex);
+  const legacy = candidates.filter((card) => card.messageIndex === undefined);
+  if (indexed.length === 1) return indexed[0];
+  if (!indexed.length && legacy.length === 1) return legacy[0];
 }
 
 export const initialSettings = () => ({ ...defaultSettings, hasKey: false });

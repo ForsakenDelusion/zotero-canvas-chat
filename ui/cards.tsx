@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, RefreshCw, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -6,7 +6,7 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { Card } from "../shared/schema";
+import { errorMessage, type Card, type CitedAnswer } from "../shared/schema";
 import type { Bridge } from "./bridge";
 import { Dialog } from "./dialogs";
 
@@ -25,18 +25,39 @@ export const cardActions = createContext<{
 }>(null!);
 export type FlowCard = Node<Card, "card">;
 
+const answerCitations = createContext<{
+  cited: CitedAnswer;
+  expandedIndex?: number;
+  activate: (index: number, trigger: HTMLButtonElement) => void;
+} | undefined>(undefined);
+
+function AnswerLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const citations = useContext(answerCitations);
+  const suffix = href && citations && href.startsWith(citations.cited.prefix)
+    ? href.slice(citations.cited.prefix.length) : "";
+  const index = /^\d+$/.test(suffix) ? Number(suffix) : -1;
+  if (!citations || index < 0 || index >= citations.cited.count) {
+    return <span className="markdown-link">{children}</span>;
+  }
+  return <button type="button" className="answer-citation" aria-haspopup="dialog"
+    aria-label={`支持段落 ${children}`} aria-expanded={index === citations.expandedIndex}
+    onMouseUp={(event) => event.stopPropagation()}
+    onClick={(event) => citations.activate(index, event.currentTarget)}>{children}</button>;
+}
+
 function CardContent({ card, call, expanded = false }: { card: Card; call: Bridge["call"]; expanded?: boolean }) {
   const [image, setImage] = useState<string | null>();
   const question = card.kind !== "excerpt" && card.kind !== "citation";
-  const answer = useMemo(() => card.answer && <div className="markdown">
+  const markdown = useContext(answerCitations)?.cited.answer ?? card.answer;
+  const answer = useMemo(() => markdown && <div className="markdown">
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex, rehypeHighlight]}
       skipHtml
       disallowedElements={["img"]}
-      components={{ a: ({ children }) => <span className="markdown-link">{children}</span> }}
-    >{card.answer}</ReactMarkdown>
-  </div>, [card.answer]);
+      components={{ a: AnswerLink }}
+    >{markdown}</ReactMarkdown>
+  </div>, [markdown]);
 
   useEffect(() => {
     if (!card.anchor?.image) return;
@@ -93,9 +114,87 @@ function SelectableCardBody({ card, expanded = false }: { card: Card; expanded?:
   </div>;
 }
 
-export function CardPreview({ card, close, children }: { card: Card; close: () => void; children?: ReactNode }) {
+export function CardPreview({ card, bridge, close, children }: {
+  card: Card; bridge: Bridge; close: () => void; children?: ReactNode;
+}) {
+  const [cited, setCited] = useState<CitedAnswer | null>(null);
+  const [expandedIndex, setExpandedIndex] = useState<number>();
+  const [citationError, setCitationError] = useState("");
+  const active = useRef<{ prefix: string; index: number; trigger: HTMLButtonElement }>(undefined);
+  const dismiss = useCallback((restoreFocus = false) => {
+    const current = active.current;
+    if (!current) return;
+    active.current = undefined;
+    setExpandedIndex(undefined);
+    void bridge.call({ type: "closeAnswerCitation", prefix: current.prefix }).catch(() => undefined);
+    if (restoreFocus) current.trigger.focus({ preventScroll: true });
+  }, [bridge]);
+
+  useEffect(() => {
+    setCited(null);
+    setCitationError("");
+    if ((!card.importedTurn && !card.nativeBranch) || !card.answer || card.status === "streaming") return;
+    let mounted = true;
+    void bridge.call({ type: "readCitedAnswer", id: card.id }).then((answer) => {
+      if (mounted) setCited(answer);
+    }).catch(() => undefined);
+    return () => {
+      mounted = false;
+      dismiss();
+    };
+  }, [bridge, card.answer, card.id, card.importedTurn, card.nativeBranch, card.status, dismiss]);
+
+  useEffect(() => {
+    if (!cited) return;
+    const unsubscribe = bridge.subscribe((event) => {
+      const current = active.current;
+      if (event.type !== "citationClosed" || current?.prefix !== event.prefix || current.index !== event.index) return;
+      active.current = undefined;
+      setExpandedIndex(undefined);
+      if (event.restoreFocus) current.trigger.focus({ preventScroll: true });
+    });
+    const clickOutside = (event: PointerEvent) => {
+      if (!(event.target instanceof Element && event.target.closest(".answer-citation"))) dismiss();
+    };
+    const scroll = () => dismiss();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !active.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss(true);
+    };
+    window.addEventListener("pointerdown", clickOutside, true);
+    window.addEventListener("scroll", scroll, true);
+    window.addEventListener("keydown", escape, true);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("pointerdown", clickOutside, true);
+      window.removeEventListener("scroll", scroll, true);
+      window.removeEventListener("keydown", escape, true);
+    };
+  }, [bridge, cited, dismiss]);
+
+  function activate(index: number, trigger: HTMLButtonElement) {
+    if (!cited) return;
+    if (active.current?.index === index) return dismiss();
+    const current = { prefix: cited.prefix, index, trigger };
+    active.current = current;
+    setExpandedIndex(index);
+    setCitationError("");
+    const { left, right, top, bottom } = trigger.getBoundingClientRect();
+    void bridge.call({ type: "openAnswerCitation", prefix: cited.prefix, index, anchor: { left, right, top, bottom } })
+      .catch((error) => {
+        if (active.current !== current) return;
+        dismiss();
+        setCitationError(errorMessage(error));
+      });
+  }
+
   return <Dialog className="card-preview" title={kinds[card.kind].label} close={close}>
-    <SelectableCardBody card={card} expanded />
+    <answerCitations.Provider value={cited ? { cited, expandedIndex, activate } : undefined}>
+      <SelectableCardBody card={card} expanded />
+    </answerCitations.Provider>
+    {citationError && <p className="muted citation-error" role="status">{citationError}</p>}
     {children}
   </Dialog>;
 }

@@ -1,0 +1,20 @@
+name: Feature Request
+description: 提出新功能或体验改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景 / 痛点
+      description: 你在阅读论文时遇到了什么具体问题？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 你希望 Canvas Chat 如何支持这一场景？
+    validations:
+      required: true

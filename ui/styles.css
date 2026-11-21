@@ -191,9 +191,30 @@ dialog::backdrop { background: #00000055; }
 .card-preview-body > h3:not(:first-child) { margin-top: 16px; }
 .card-preview-question p { white-space: pre-wrap; }
 .card-preview-body .excerpt-image { max-height: none; }
+.card-preview .answer-citation {
+  display: inline-flex; align-items: center; vertical-align: baseline;
+  padding: 0 .4em; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--hover); color: var(--muted); font: inherit; font-size: .75em;
+  line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
+  user-select: none;
+}
+.card-preview .answer-citation:is(:hover, :focus-visible, [aria-expanded="true"]) {
+  border-color: var(--muted); color: var(--ink);
+}
+.card-preview .citation-error { flex-shrink: 0; padding: 6px 12px; border-top: 1px solid var(--line); }
 dialog form { display: grid; gap: 12px; }
 dialog label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
 input, textarea, select { width: 100%; min-height: 37px; background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 7px; padding: 8px 10px; }
+.provider-picker { position: relative; min-width: 0; }
+.provider-picker select { appearance: none; display: block; padding-inline-end: 34px; cursor: pointer; }
+.provider-chevron {
+  position: absolute;
+  top: 50%;
+  inset-inline-end: 11px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
 textarea { resize: vertical; max-height: 40vh; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }
 .field-note { font-size: 12px; line-height: 1.5; }

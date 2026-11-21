@@ -1,8 +1,12 @@
 node_modules/
 dist/
+coverage/
 .env
 .env.*
 *.xpi
 *.sqlite
 *.sqlite-*
+*.mp4
+*.mov
+*.log
 .DS_Store

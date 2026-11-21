@@ -28,6 +28,7 @@ export const cardSchema = position.extend({
   anchor: anchorSchema.optional(),
   sources: z.array(anchorSchema).max(30).optional(),
   importedTurn: id.optional(),
+  messageIndex: z.number().int().nonnegative().optional(),
   nativeBranch: z.number().int().positive().optional(),
   reference: referenceSchema.optional(),
   prompt: z.string().max(20000).optional(),
@@ -51,7 +52,7 @@ export const documentSchema = z.object({
 });
 
 export const settingsSchema = z.object({
-  provider: z.enum(["compatible", "anthropic", "ollama", "llm-for-zotero"]),
+  provider: z.enum(["compatible", "anthropic", "ollama"]),
   endpoint: z.string().trim().max(2048),
   model: z.string().trim().max(200),
 });
@@ -65,6 +66,12 @@ export const commandSchema = z.discriminatedUnion("type", [
     anchor: z.object({ left: z.number(), top: z.number(), bottom: z.number() }).optional(),
   }),
   z.object({ type: z.literal("closeComposer"), request: id }),
+  z.object({ type: z.literal("readCitedAnswer"), id }),
+  z.object({
+    type: z.literal("openAnswerCitation"), prefix: id, index: z.number().int().nonnegative(),
+    anchor: z.object({ left: z.number(), right: z.number(), top: z.number(), bottom: z.number() }),
+  }),
+  z.object({ type: z.literal("closeAnswerCitation"), prefix: id }),
   z.object({ type: z.literal("branch"), parents: z.array(id).max(50), prompt: z.string().trim().min(1).max(20000), quote: z.string().max(50000).optional() }),
   z.object({ type: z.literal("move"), positions: z.array(position.extend({ id })).max(1000) }),
   z.object({ type: z.literal("viewport"), viewport: viewportSchema }),
@@ -91,8 +98,16 @@ export type Settings = z.infer<typeof settingsSchema>;
 export type Command = z.infer<typeof commandSchema>;
 export type Position = z.infer<typeof position>;
 export type Excerpt = { quote?: string; anchor: Anchor };
-export type ImportedTurn = { id: string; prompt: string; answer: string; sources: Anchor[] };
-export type ConversationTurn = ImportedTurn & { stopped?: boolean; branchID?: string };
+export type ConversationTurn = {
+  id: string;
+  prompt: string;
+  answer: string;
+  sources: Anchor[];
+  messageIndex?: number;
+  stopped?: boolean;
+  branchID?: string;
+};
+export type CitedAnswer = { answer: string; prefix: string; count: number };
 export type Snapshot = {
   document: CanvasDocument;
   paper: Reference;
@@ -100,7 +115,6 @@ export type Snapshot = {
   undo: boolean;
   redo: boolean;
   settings: Settings & { hasKey: boolean };
-  companionAvailable?: boolean;
   saved: boolean;
   saveError?: string;
 };
@@ -108,10 +122,12 @@ export type Event =
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "card"; card: Card }
   | { type: "focus"; id: string }
-  | { type: "composerClosed"; request: string; draft: string };
+  | { type: "composerClosed"; request: string; draft: string }
+  | { type: "citationClosed"; prefix: string; index: number; restoreFocus: boolean };
 export type Reply = {
   ready: Snapshot;
   openComposer: boolean;
+  readCitedAnswer: CitedAnswer | null;
   branch: string;
   search: Reference[];
   image: string | null;
