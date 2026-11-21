@@ -4,6 +4,27 @@
 
 **Canvas Chat** 是面向 [LLM-for-Zotero](https://github.com/yilewang/llm-for-zotero) 的独立维护的附属插件。它在同一窗口内把当前论文对话显示为画布，让你基于 PDF 摘录或已有回答继续追问，并把选中的阅读路径整理成带原文跳转的 Zotero 笔记。
 
+## 界面截图
+
+**同一对话，双栏呈现**。左侧是 LLM-for-Zotero 的论文对话，右侧将同一轮问答显示为卡片，并保留从它派生的两条追问分支。
+
+![LLM-for-Zotero 独立窗口中，左侧的论文问答同步显示在右侧画布，并派生两张追问卡片](docs/screenshots/chat-and-canvas.png)
+
+<details>
+<summary>查看 PDF 摘录和卡片引用截图</summary>
+
+**PDF 摘录**。在阅读器中选取原文，右侧画布保留摘录和页码。点击页码可跳回 PDF。
+
+![Zotero PDF 阅读器左侧高亮论文原文，右侧画布显示对应的摘录卡片和页码](docs/screenshots/pdf-sidebar.png)
+
+**展开卡片查看引用**。在完整回答中点击引用编号，即可查看论文中的支持段落。
+
+![画布卡片展开后，点击回答中的引用编号会弹出支持段落](docs/screenshots/expanded-citations.png)
+
+</details>
+
+截图取自 Canvas Chat 0.4.22 开发版的 Zotero 界面，问答为演示内容。示例论文为 Sandve 等人（2013）的 [*Ten Simple Rules for Reproducible Computational Research*](https://doi.org/10.1371/journal.pcbi.1003285)（CC BY）。
+
 ## 目录
 
 - [功能概览](#功能概览)
