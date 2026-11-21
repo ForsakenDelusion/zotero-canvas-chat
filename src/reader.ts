@@ -2,23 +2,6 @@ import type { Excerpt } from "../shared/schema";
 import { makeAnchor, parentPaper } from "./library";
 
 export function readerHooks(pluginId: string, open: (paper: Zotero.Item, excerpt?: Excerpt) => void, available: () => boolean) {
-  const selection: _ZoteroTypes.Reader.EventHandler<"renderTextSelectionPopup"> = ({ doc, params, reader, append }) => {
-    if (!available()) return;
-    const attachment = reader.itemID ? Zotero.Items.get(reader.itemID) : undefined;
-    const paper = parentPaper(attachment);
-    const annotation = params.annotation;
-    const page = annotation?.position?.pageIndex;
-    const quote = annotation?.text?.trim();
-    if (!paper || !attachment || !attachment.isPDFAttachment() || !quote || !Number.isInteger(page) || page! < 0) return;
-    const button = doc.createElement("button");
-    button.type = "button";
-    button.className = "toolbar-button";
-    button.textContent = "画布分支";
-    button.title = "把选中的文字发到阅读画布";
-    button.addEventListener("click", () => open(paper, { quote, anchor: makeAnchor(attachment, page!) }));
-    append(button);
-  };
-
   const annotationMenu: _ZoteroTypes.Reader.EventHandler<"createAnnotationContextMenu"> = ({ reader, params, append }) => {
     if (!available()) return;
     const attachment = reader.itemID ? Zotero.Items.get(reader.itemID) : undefined;
@@ -56,11 +39,9 @@ export function readerHooks(pluginId: string, open: (paper: Zotero.Item, excerpt
     append(button);
   };
 
-  Zotero.Reader.registerEventListener("renderTextSelectionPopup", selection, pluginId);
   Zotero.Reader.registerEventListener("createAnnotationContextMenu", annotationMenu, pluginId);
   Zotero.Reader.registerEventListener("renderToolbar", toolbar, pluginId);
   return () => {
-    Zotero.Reader.unregisterEventListener("renderTextSelectionPopup", selection);
     Zotero.Reader.unregisterEventListener("createAnnotationContextMenu", annotationMenu);
     Zotero.Reader.unregisterEventListener("renderToolbar", toolbar);
   };
