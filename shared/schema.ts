@@ -28,6 +28,7 @@ export const cardSchema = position.extend({
   anchor: anchorSchema.optional(),
   sources: z.array(anchorSchema).max(30).optional(),
   importedTurn: id.optional(),
+  nativeTurn: id.optional(),
   messageIndex: z.number().int().nonnegative().optional(),
   nativeBranch: z.number().int().positive().optional(),
   reference: referenceSchema.optional(),
@@ -106,6 +107,7 @@ export type ConversationTurn = {
   messageIndex?: number;
   stopped?: boolean;
   branchID?: string;
+  quotedTexts?: string[];
 };
 export type CitedAnswer = { answer: string; prefix: string; count: number };
 export type Snapshot = {

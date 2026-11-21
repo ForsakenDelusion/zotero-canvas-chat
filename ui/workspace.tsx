@@ -4,7 +4,7 @@ import {
   useNodesInitialized, useReactFlow, useViewport, type Edge, type NodeChange,
 } from "@xyflow/react";
 import {
-  BookOpen, Check, Combine, Focus, GitFork, LibraryBig,
+  ArrowDown, BookOpen, Check, Combine, Focus, GitFork, LibraryBig,
   ListTree, LoaderCircle, Maximize, Minus, Network, Plus,
   Redo2, Settings2, Sparkles, Trash2, Undo2,
 } from "lucide-react";
@@ -47,8 +47,8 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   const firstFrame = useRef(true);
   const shownConversation = useRef(initial.conversationKey);
   const cards = snapshot.document.cards;
-  const lastTurn = cards.findLast((card) => card.importedTurn && card.status === "done") ??
-    cards.findLast((card) => card.importedTurn);
+  const lastMain = cards.findLast((card) => Boolean(card.importedTurn));
+  const lastTurn = cards.findLast((card) => card.importedTurn && card.status === "done") ?? lastMain;
   const hasCards = cards.length > 0;
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const path = useMemo(() => {
@@ -162,7 +162,9 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
 
   const openQuestion = useCallback((parents: string[], anchor: Composer["anchor"], quote?: string, trigger?: HTMLButtonElement) => {
     const conversationKey = snapshot.conversationKey;
-    const draftKey = JSON.stringify([conversationKey, [...parents].sort(), quote]);
+    const continuesMain = Boolean(conversationKey && !quote?.trim() && parents.length === 1 && lastMain && parents[0] === lastMain.id);
+    const composerParents = continuesMain ? [] : parents;
+    const draftKey = JSON.stringify([conversationKey, [...composerParents].sort(), quote]);
     const request = String(++questionSequence.current);
     const source = parents.length === 1 ? cards.find((card) => card.id === parents[0])?.title :
       parents.length ? `${parents.length} 张卡片` : undefined;
@@ -170,7 +172,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     questionKeys.current.set(request, draftKey);
     const bounds = anchor();
     void bridge.call({
-      type: "openComposer", request, parents, quote, source, draft: drafts.current.get(draftKey) ?? "",
+      type: "openComposer", request, parents: composerParents, quote, source, draft: drafts.current.get(draftKey) ?? "",
       anchor: bounds && { left: bounds.left, top: bounds.top, bottom: bounds.bottom },
     }).then((opened) => {
       if (!opened) questionKeys.current.delete(request);
@@ -180,7 +182,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
       setQuestion((current) => current?.request === request ? undefined : current);
       report(errorMessage(error), true);
     });
-  }, [bridge, cards, report, snapshot.conversationKey]);
+  }, [bridge, cards, lastMain, report, snapshot.conversationKey]);
 
   useEffect(() => {
     const request = question?.request;
@@ -201,11 +203,12 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     openQuestion([id], anchor, quote, trigger);
   }, [openQuestion]);
   const actions = useMemo(() => ({
-    ask, call: bridge.call, expand(cardId: string, trigger: HTMLButtonElement) {
+    ask, call: bridge.call, lastMainId: snapshot.conversationKey ? lastMain?.id : undefined,
+    expand(cardId: string, trigger: HTMLButtonElement) {
       setQuestion(undefined);
       setModal({ cardId, trigger });
     },
-  }), [ask, bridge.call]);
+  }), [ask, bridge.call, lastMain?.id, snapshot.conversationKey]);
 
   const nodes = useMemo<FlowCard[]>(() => cards.map((card) => ({
     id: card.id, type: "card", data: card, position: positions[card.id] || { x: card.x, y: card.y },
@@ -345,8 +348,10 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
           {active.length > 0 && <div className="tool-group selection-tools">
             <span>{active.length} 张已选</span>
             <button disabled={pendingPath} onClick={(event) => askFromButton(active, event.currentTarget)}>
-              {active.length > 1 ? <Combine size={16} /> : <GitFork size={16} />}
-              {active.length > 1 ? "汇聚" : "追问"}
+              {active.length > 1 ? <Combine size={16} />
+                : snapshot.conversationKey && lastMain && active[0] === lastMain.id ? <ArrowDown size={16} /> : <GitFork size={16} />}
+              {active.length > 1 ? "汇聚"
+                : snapshot.conversationKey && lastMain && active[0] === lastMain.id ? "继续对话" : "追问"}
             </button>
             <button disabled={pendingPath || crystallizing} onClick={() => void crystallize(active)}>
               {crystallizing ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}

@@ -117,6 +117,33 @@ export function askConversation(container: Element, itemID: number, key: number,
   send.click();
 }
 
+function readModelQuotes(message: HTMLElement) {
+  const quotes: string[] = [];
+  const inlineQuestions: string[] = [];
+  const seen = new Set<string>();
+  const addQuote = (raw: string | null | undefined) => {
+    const text = (raw || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    quotes.push(text.slice(0, 10000));
+  };
+  const bars = Array.from(message.querySelectorAll('.llm-user-selected-text[data-context-source="model"]')) as HTMLElement[];
+  for (const bar of bars) {
+    const index = bar.dataset.contextIndex;
+    const expanded = index !== undefined
+      ? message.querySelector(`.llm-user-selected-text-expanded[data-context-index="${index}"]`)
+      : null;
+    addQuote(expanded?.textContent || bar.querySelector(".llm-user-selected-text-content")?.textContent);
+  }
+  const cards = Array.from(message.querySelectorAll('.llm-user-selected-text-expanded[data-context-source="model"]')) as HTMLElement[];
+  for (const card of cards) {
+    addQuote(card.querySelector(".llm-selected-context-text")?.textContent);
+    const q = card.querySelector(".llm-selected-context-question")?.textContent?.trim();
+    if (q) inlineQuestions.push(q);
+  }
+  return { quotes, inlineQuestions };
+}
+
 export function observeConversation(
   container: Element, itemID: number, update: (key: number, turns: ReadTurn[], partial: boolean) => void,
 ) {
@@ -144,13 +171,18 @@ export function observeConversation(
       !!box.querySelector('[data-message-role="user"] #llm-input, .llm-bubble.streaming, .llm-typing');
     let user: Element | undefined;
     let userIndex = -1;
+    let userQuotes: string[] = [];
+    let userInlineQuestions: string[] = [];
     for (const message of messages) {
       if (message.dataset.messageRole === "user") {
         user = message.querySelector(".llm-bubble.user") ?? undefined;
         userIndex = Number(message.dataset.messageIndex);
+        const extracted = readModelQuotes(message);
+        userQuotes = extracted.quotes;
+        userInlineQuestions = extracted.inlineQuestions;
         continue;
       }
-      if (message.dataset.messageRole !== "assistant" || !user ||
+      if (message.dataset.messageRole !== "assistant" || (!user && !userInlineQuestions.length) ||
           message.classList.contains("llm-compact-marker-wrapper") ||
           Number(message.dataset.messageIndex) !== userIndex + 1 ||
           message.querySelector(".llm-bubble.streaming, .llm-typing")) continue;
@@ -160,9 +192,11 @@ export function observeConversation(
       const answer = answerMarkdown(blocks);
       if (!answer) continue;
       const stopped = /^\[(?:Cancelled|Canceled|Aborted|已取消)\]$/i.test(answer);
-      const { question, branchID } = readNativePrompt(user.textContent || "");
+      const rawPrompt = (user?.textContent || "").trim() || userInlineQuestions.join("\n\n");
+      const { question, branchID } = readNativePrompt(rawPrompt);
       turns.push({
         timestamp, messageIndex: userIndex, stopped, branchID,
+        quotedTexts: userQuotes.length ? userQuotes : undefined,
         question: question.slice(0, 20000),
         answer: stopped ? "" : answer,
         sources: blocks.flatMap(pdfSources).slice(0, 30),
@@ -203,6 +237,7 @@ type ReadTurn = {
   timestamp: number;
   messageIndex: number;
   branchID?: string;
+  quotedTexts?: string[];
   question: string;
   answer: string;
   sources: ReturnType<typeof pdfSources>;

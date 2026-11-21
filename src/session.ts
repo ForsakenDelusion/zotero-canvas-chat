@@ -1,10 +1,11 @@
-import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPosition, paperContext, type Message } from "../shared/graph";
-import { nativeBranchPrompt } from "../shared/question";
+import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPosition, paperContext, type Message, type NativeBranchContext } from "../shared/graph";
 import {
   defaultSettings, documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
   type Command, type ConversationTurn, type Event, type Excerpt, type Reference, type Settings, type Snapshot,
 } from "../shared/schema";
 import { modelEndpoint } from "./model";
+
+export type NativeBranchSubmission = NativeBranchContext & { prompt: string };
 
 export interface CanvasHost {
   paper: Reference;
@@ -148,37 +149,109 @@ export class CanvasSession {
   syncConversation(turns: ConversationTurn[], partial = false) {
     return this.serial(() => {
       if (this.disposed || !turns.length) return;
-      const nativeBranches = new Map(this.document.cards.filter((card) => card.nativeBranch).map((card) => [card.id, card]));
+      const existing = this.document.cards;
+      const byTurn = new Map(existing.filter((card) => card.importedTurn).map((card) => [card.importedTurn!, card]));
+      const nativeBranchCards = existing.filter((card) => card.nativeBranch);
+      const byBranchID = new Map(nativeBranchCards.map((card) => [card.id, card]));
+      const byNativeTurn = new Map(nativeBranchCards.filter((card) => card.nativeTurn).map((card) => [card.nativeTurn!, card]));
+      const activeTurnIDs = new Set(turns.map((turn) => turn.id));
+      const claimedTurnIDs = new Set<string>();
+      const matchedBranchIDs = new Set<string>();
+
+      const matchBranch = (turn: ConversationTurn): Card | undefined => {
+        if (turn.branchID) {
+          const legacy = byBranchID.get(turn.branchID);
+          if (legacy && !matchedBranchIDs.has(legacy.id)) return legacy;
+        }
+        const bound = byNativeTurn.get(turn.id);
+        if (bound && !matchedBranchIDs.has(bound.id)) return bound;
+        if (byTurn.has(turn.id)) return undefined;
+        const key = Number(turn.id.split(":", 1)[0]);
+        if (!key) return undefined;
+        const pending = nativeBranchCards.filter((card) =>
+          card.nativeBranch === key && !card.nativeTurn && card.status === "streaming" && !matchedBranchIDs.has(card.id));
+        if (pending.length) {
+          const byIndex = turn.messageIndex !== undefined
+            ? pending.filter((card) => card.messageIndex === turn.messageIndex)
+            : [];
+          if (byIndex.length === 1) return byIndex[0];
+          if (!byIndex.length) {
+            const byPrompt = pending.filter((card) => card.prompt === turn.prompt);
+            if (byPrompt.length === 1) return byPrompt[0];
+          }
+        }
+        return replacedNativeBranch(nativeBranchCards, turn, activeTurnIDs, matchedBranchIDs);
+      };
+
       for (const turn of turns) {
-        const branch = turn.branchID && nativeBranches.get(turn.branchID);
+        const branch = matchBranch(turn);
         if (!branch) continue;
+        claimedTurnIDs.add(turn.id);
+        matchedBranchIDs.add(branch.id);
         const status = turn.stopped ? "stopped" : "done";
         const nativeBranch = Number(turn.id.split(":", 1)[0]) || branch.nativeBranch;
+        const messageIndex = turn.messageIndex ?? branch.messageIndex;
         if (branch.answer === turn.answer && branch.status === status && branch.nativeBranch === nativeBranch &&
+            branch.nativeTurn === turn.id && branch.messageIndex === messageIndex &&
             branch.prompt === turn.prompt &&
             JSON.stringify(branch.sources ?? []) === JSON.stringify(turn.sources)) continue;
         this.finishNativeBranch(branch.id, {
           title: turn.prompt.slice(0, 80), prompt: turn.prompt, answer: turn.answer,
-          sources: turn.sources, status, nativeBranch,
+          sources: turn.sources, status, nativeBranch, nativeTurn: turn.id, messageIndex,
         });
       }
       if (partial) return;
-      const existing = this.document.cards;
-      const byTurn = new Map(existing.filter((card) => card.importedTurn).map((card) => [card.importedTurn, card]));
-      const responses = turns.filter((turn) => !turn.branchID || !nativeBranches.has(turn.branchID));
-      const firstNewResponse = responses[responses.findLastIndex((turn) => byTurn.has(turn.id)) + 1];
+      const latest = this.document.cards;
+      const latestByTurn = new Map(latest.filter((card) => card.importedTurn).map((card) => [card.importedTurn!, card]));
+      const unclaimed = turns.filter((turn) => !claimedTurnIDs.has(turn.id));
+      const lastExistingIndex = unclaimed.findLastIndex((turn) => latestByTurn.has(turn.id));
+      let usedReplacement = false;
       const synced: Card[] = [];
+      const syncedMain: Card[] = [];
       const added: Card[] = [];
-      for (const turn of responses) {
-        const previous = synced.at(-1);
-        const current = byTurn.get(turn.id) ??
-          (turn === firstNewResponse ? replacedResponse(byTurn.values(), turn, previous) : undefined);
-        if (!current && existing.length + added.length >= 1000) continue;
+      const conversationKey = Number(turns[0]?.id.split(":", 1)[0]) || 0;
+      const branchPool = latest.filter((card) =>
+        card.nativeBranch === conversationKey && card.nativeTurn && activeTurnIDs.has(card.nativeTurn));
+      for (const [unclaimedIndex, turn] of unclaimed.entries()) {
+        const previous = syncedMain.at(-1);
+        const existingMain = latestByTurn.get(turn.id);
+        if (!existingMain && turn.quotedTexts?.length && conversationKey) {
+          const candidates = [...branchPool, ...syncedMain, ...added].filter((card) =>
+            card.answer && (turn.messageIndex === undefined || card.messageIndex === undefined || card.messageIndex < turn.messageIndex));
+          const quotedParents = findQuotedParents(candidates, turn.quotedTexts);
+          if (quotedParents.length) {
+            if (latest.length + added.length >= 1000) continue;
+            const branchCard: Card = {
+              id: `llm:${turn.id}`,
+              ...nextPosition([...latest, ...added], quotedParents),
+              kind: quotedParents.length > 1 ? "synthesis" : "branch",
+              nativeBranch: conversationKey,
+              nativeTurn: turn.id,
+              messageIndex: turn.messageIndex,
+              parents: quotedParents.map((parent) => parent.id),
+              quote: turn.quotedTexts.join("\n\n").slice(0, 50000),
+              title: turn.prompt.slice(0, 80),
+              prompt: turn.prompt,
+              answer: turn.answer,
+              sources: turn.sources,
+              status: turn.stopped ? "stopped" : "done",
+            };
+            added.push(branchCard);
+            synced.push(branchCard);
+            continue;
+          }
+        }
+        let current = existingMain;
+        if (!current && unclaimedIndex > lastExistingIndex && !usedReplacement) {
+          usedReplacement = true;
+          current = replacedResponse(latestByTurn.values(), turn, previous);
+        }
+        if (!current && latest.length + added.length >= 1000) continue;
         const position = current ?? (previous
           ? { x: previous.x, y: previous.y + 420 }
-          : nextPosition(existing, []));
+          : nextPosition(latest, []));
         let { x, y } = position;
-        while (!current && (existing.some(overlaps) || added.some(overlaps))) y += 420;
+        while (!current && (latest.some(overlaps) || added.some(overlaps))) y += 420;
         function overlaps(card: Card) {
           return Math.abs(card.x - x) < 360 && Math.abs(card.y - y) < 400;
         }
@@ -191,9 +264,11 @@ export class CanvasSession {
           status: turn.stopped ? "stopped" : "done",
         };
         if (!current) added.push(updated);
-        synced.push(current && JSON.stringify(current) === JSON.stringify(updated) ? current : updated);
+        const resolved = current && JSON.stringify(current) === JSON.stringify(updated) ? current : updated;
+        synced.push(resolved);
+        syncedMain.push(resolved);
       }
-      if (synced.every((card) => byTurn.get(card.importedTurn) === card)) return;
+      if (synced.every((card) => card.importedTurn && latestByTurn.get(card.importedTurn) === card)) return;
       const apply = (cards: Card[]) => {
         const byId = new Map(cards.map((card) => [card.id, card]));
         for (const card of synced) {
@@ -218,14 +293,14 @@ export class CanvasSession {
           history[index] = cards.length > 1000 ? this.document.cards : cards;
         }
       }
-      this.update(apply(existing), false);
+      this.update(apply(latest), false);
       this.scheduleSave();
     });
   }
 
   submitNativeBranch(
     ids: string[], prompt: string, quote: string | undefined, conversationKey: number,
-    send: (text: string, images: string[]) => Promise<void>, stop: () => void,
+    send: (payload: NativeBranchSubmission) => Promise<{ messageIndex?: number } | void>, stop: () => void,
   ) {
     return this.serial(async () => {
       if (this.disposed) throw new Error("画布已关闭。");
@@ -236,15 +311,17 @@ export class CanvasSession {
         kind: parents.length > 1 ? "synthesis" : "branch", title: prompt.slice(0, 80),
         prompt, quote, nativeBranch: conversationKey, status: "streaming",
       }, parents);
-      const context = await nativeBranchContext(path, parents, quote, (anchor) => this.host.image(anchor));
-      await send(nativeBranchPrompt(card.id, prompt, context.text), context.images);
+      const context = await nativeBranchContext(path, parents, quote, (anchor) => this.host.image(anchor), conversationKey);
+      const sent = await send({ prompt, ...context });
+      const created = sent?.messageIndex !== undefined ? { ...card, messageIndex: sent.messageIndex } : card;
       const timeout = setTimeout(() => {
-        void this.serial(() => this.finishNativeBranch(card.id, { status: "stopped" })).catch(() => undefined);
+        void this.serial(() => this.finishNativeBranch(created.id, { status: "stopped" })).catch(() => undefined);
       }, 300_000);
-      this.nativeJobs.set(card.id, { stop, timeout });
-      this.update([...this.document.cards, card]);
-      this.emit({ type: "focus", id: card.id });
+      this.nativeJobs.set(created.id, { stop, timeout });
+      this.update([...this.document.cards, created]);
+      this.emit({ type: "focus", id: created.id });
       this.scheduleSave();
+      return created.id;
     });
   }
 
@@ -454,6 +531,50 @@ export class CanvasSession {
     clearTimeout(this.queuedSave);
     if (!this.saved) await this.serial(() => this.save());
   }
+}
+
+function quoteCore(text: string) {
+  return text.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+}
+
+function answerMatchesQuote(answer: string, quote: string) {
+  const cleanQuote = quote.replace(/\s+/g, " ").trim();
+  if (cleanQuote.length >= 4 && answer.replace(/\s+/g, " ").includes(cleanQuote)) return true;
+  const needle = quoteCore(quote);
+  if (needle.length < 6) return false;
+  const haystack = quoteCore(answer);
+  if (haystack.includes(needle)) return true;
+  if (needle.length >= 30) {
+    const start = haystack.indexOf(needle.slice(0, 16));
+    if (start >= 0 && haystack.indexOf(needle.slice(-16), start + 16) >= 0) return true;
+  }
+  return false;
+}
+
+function findQuotedParents(candidates: Card[], quotedTexts: string[]) {
+  const ordered = [...candidates].sort((a, b) => (b.messageIndex ?? -1) - (a.messageIndex ?? -1));
+  const matched = new Map<string, Card>();
+  for (const quote of quotedTexts) {
+    const parent = ordered.find((card) => card.answer && answerMatchesQuote(card.answer, quote));
+    if (parent) matched.set(parent.id, parent);
+  }
+  return [...matched.values()];
+}
+
+function replacedNativeBranch(
+  cards: Card[], turn: ConversationTurn, activeTurnIDs: ReadonlySet<string>, matchedBranchIDs: ReadonlySet<string>,
+) {
+  if (turn.messageIndex === undefined) return;
+  const [key, timestamp] = turn.id.split(":");
+  const keyNumber = Number(key);
+  const candidates = cards.filter((card) => {
+    if (matchedBranchIDs.has(card.id) || card.nativeBranch !== keyNumber ||
+        !card.nativeTurn || activeTurnIDs.has(card.nativeTurn) ||
+        card.messageIndex !== turn.messageIndex) return false;
+    const [oldKey, oldTimestamp] = card.nativeTurn.split(":");
+    return oldKey === key && Number(oldTimestamp) < Number(timestamp);
+  });
+  if (candidates.length === 1) return candidates[0];
 }
 
 function replacedResponse(cards: Iterable<Card>, turn: ConversationTurn, previous?: Card) {

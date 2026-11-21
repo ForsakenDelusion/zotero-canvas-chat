@@ -23,7 +23,11 @@ export function conversationCards(
   cards: Card[], turns: ReadonlySet<string>, conversationKey = 0, branches: ReadonlySet<string> = new Set(),
 ): Card[] {
   const activeBranches = new Set(cards.filter((card) =>
-    card.nativeBranch === conversationKey && (branches.has(card.id) || card.status === "streaming")).map((card) => card.id));
+    card.nativeBranch === conversationKey && (
+      branches.has(card.id) ||
+      (card.nativeTurn !== undefined && turns.has(card.nativeTurn)) ||
+      card.status === "streaming"
+    )).map((card) => card.id));
   const sources = new Set(activeBranches);
   for (let index = cards.length - 1; index >= 0; index--) {
     const card = cards[index];
@@ -90,7 +94,80 @@ function numberedMaterial(material: Awaited<ReturnType<typeof materialFor>>) {
   });
 }
 
-export async function nativeBranchContext(path: Card[], parents: Card[], quote: string | undefined, imageFor: ImageFor) {
+const MAX_NATIVE_QUOTE_CHIPS = 5;
+const MAX_NATIVE_QUOTE_LENGTH = 3800;
+
+function clipSnippet(text: string, limit: number): string {
+  const clean = text.trim();
+  if (clean.length <= limit) return clean;
+  return `${clean.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function inConversation(card: Card, conversationKey?: number): boolean {
+  if (!conversationKey) return false;
+  return card.nativeBranch === conversationKey || Boolean(card.importedTurn?.startsWith(`${conversationKey}:`));
+}
+
+function quoteSnippetForCard(card: Card, includeHeading: boolean): string {
+  if (card.answer?.trim()) {
+    const body = card.answer.trim();
+    return includeHeading ? `【${card.title}】\n${body}` : body;
+  }
+  const parts = [
+    card.reference && `文献：${card.reference.title} (${card.reference.authors}, ${card.reference.year})\n摘要：${card.reference.abstract}`,
+    card.anchor && `PDF 第 ${card.anchor.page} 页`,
+    card.quote?.trim(),
+    !card.quote && card.prompt?.trim(),
+  ].filter(Boolean) as string[];
+  const text = parts.join("\n").trim() || card.title;
+  return includeHeading && !card.anchor && !card.reference ? `【${card.title}】\n${text}` : text;
+}
+
+function buildNativeQuotes(path: Card[], parents: Card[], quote: string | undefined, conversationKey?: number): string[] {
+  const selection = quote?.trim();
+  const parentIDs = new Set(parents.map((card) => card.id));
+  const externalHistory = path.filter((card) => !parentIDs.has(card.id) && !inConversation(card, conversationKey));
+
+  if (selection) {
+    if (selection.length > MAX_NATIVE_QUOTE_LENGTH) return [];
+    if (parents.length === 1 && !externalHistory.length) {
+      const [parent] = parents;
+      if (inConversation(parent, conversationKey)) return [selection];
+      const prefix = parent.anchor ? `PDF 第 ${parent.anchor.page} 页：\n`
+        : parent.reference ? `文献《${parent.reference.title}》：\n` : "";
+      const combined = `${prefix}${selection}`;
+      return combined.length <= MAX_NATIVE_QUOTE_LENGTH ? [combined] : [];
+    }
+    const snippets: string[] = [selection];
+    for (const card of [...parents, ...externalHistory]) {
+      if (card.anchor?.image && !card.quote && !card.answer) continue;
+      const raw = quoteSnippetForCard(card, true);
+      if (!inConversation(card, conversationKey) && raw.length > MAX_NATIVE_QUOTE_LENGTH) return [];
+      snippets.push(clipSnippet(raw, MAX_NATIVE_QUOTE_LENGTH));
+    }
+    return snippets.length <= MAX_NATIVE_QUOTE_CHIPS ? snippets : [];
+  }
+
+  const targets = [...parents, ...externalHistory];
+  const includeHeading = targets.length > 1;
+  const snippets: string[] = [];
+  for (const card of targets) {
+    const raw = quoteSnippetForCard(card, includeHeading);
+    if (!inConversation(card, conversationKey) && raw.length > MAX_NATIVE_QUOTE_LENGTH) return [];
+    snippets.push(clipSnippet(raw, MAX_NATIVE_QUOTE_LENGTH));
+  }
+  return snippets.length <= MAX_NATIVE_QUOTE_CHIPS ? snippets : [];
+}
+
+export type NativeBranchContext = {
+  quotes: string[];
+  markdown: string;
+  images: string[];
+};
+
+export async function nativeBranchContext(
+  path: Card[], parents: Card[], quote: string | undefined, imageFor: ImageFor, conversationKey?: number,
+): Promise<NativeBranchContext> {
   const material = numberedMaterial(await materialFor(path, imageFor));
   const parentIDs = new Set(parents.map((card) => card.id));
   const focus = material.filter(({ id }) => parentIDs.has(id));
@@ -105,9 +182,13 @@ export async function nativeBranchContext(path: Card[], parents: Card[], quote: 
   const sources = focus.map(({ text }) => text);
   const excerpted = sources.join("\n\n").length <= remaining - 2
     ? sources : sources.map((text) => text.slice(0, perCard));
-  const text = [heading, ...excerpted, ...(history.length ? ["较早的画布脉络：", ...history.map(({ text }) => text)] : [])]
+  const markdown = [heading, ...excerpted, ...(history.length ? ["较早的画布脉络：", ...history.map(({ text }) => text)] : [])]
     .join("\n\n").slice(0, 60000).trimEnd();
-  return { text, images: [...focus, ...history].flatMap(({ image }) => image ? [image] : []) };
+  return {
+    quotes: buildNativeQuotes(path, parents, quote, conversationKey),
+    markdown,
+    images: [...focus, ...history].flatMap(({ image }) => image ? [image] : []),
+  };
 }
 
 export async function messagesFor(

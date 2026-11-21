@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ancestors } from "../shared/graph.ts";
+import { ancestors, nativeBranchContext } from "../shared/graph.ts";
 import type { CanvasDocument, Card } from "../shared/schema.ts";
 import { organizeCards } from "../ui/layout.ts";
 
@@ -47,4 +47,36 @@ test("organizing puts the conversation in order and spaces measured branches and
   assert.ok(laterBranch.y > earlierBranch.y + cards[4].height);
   assert.ok(merge.x > earlierBranch.x + cards[4].width);
   assert.ok(merge.y >= laterBranch.y);
+});
+
+test("nativeBranchContext builds clean quote chips and falls back cleanly on oversized context", async () => {
+  const responseA: Card = {
+    id: "a", parents: [], x: 0, y: 0, kind: "response", importedTurn: "42:100",
+    title: "Mechanism", prompt: "How does it work?", answer: "Detailed answer A.", status: "done",
+  };
+  const responseB: Card = {
+    id: "b", parents: ["a"], x: 0, y: 420, kind: "response", importedTurn: "42:200",
+    title: "Limits", prompt: "What are limits?", answer: "Detailed answer B.", status: "done",
+  };
+  const longExcerpt: Card = {
+    id: "e", parents: [], x: 0, y: 0, kind: "excerpt", title: "PDF 原文摘录",
+    anchor: { uri: "zotero://open-pdf/library/items/ABCDEFGH?page=3", page: 3 },
+    quote: "z".repeat(4500),
+  };
+
+  const singleSelection = await nativeBranchContext([responseA, responseB], [responseB], "key phrase", async () => null, 42);
+  assert.deepEqual(singleSelection.quotes, ["key phrase"]);
+
+  const synthesis = await nativeBranchContext([responseA, responseB], [responseA, responseB], undefined, async () => null, 42);
+  assert.equal(synthesis.quotes.length, 2);
+  assert.match(synthesis.quotes[0], /^【Mechanism】\nDetailed answer A\.$/);
+  assert.match(synthesis.quotes[1], /^【Limits】\nDetailed answer B\.$/);
+
+  const oversizedSelection = await nativeBranchContext([responseA], [responseA], "k".repeat(4100), async () => null, 42);
+  assert.deepEqual(oversizedSelection.quotes, []);
+  assert.match(oversizedSelection.markdown, /本次追问选中的文字/);
+
+  const oversizedExternal = await nativeBranchContext([longExcerpt], [longExcerpt], undefined, async () => null, 42);
+  assert.deepEqual(oversizedExternal.quotes, []);
+  assert.match(oversizedExternal.markdown, /PDF 第 3 页/);
 });

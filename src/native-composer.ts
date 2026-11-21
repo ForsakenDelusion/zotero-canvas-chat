@@ -84,7 +84,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     const head = html(doc, "div");
     head.className = "zcanvas-composer-head";
     const title = html(doc, "span");
-    const label = command.parents.length > 1 ? "汇聚" : command.parents.length ? "追问" : "论文对话";
+    const label = command.parents.length > 1 ? "汇聚" : command.parents.length ? "追问" : command.source ? "继续对话" : "论文对话";
     title.textContent = command.source ? `${label} · ${command.source}` : label;
     title.title = title.textContent;
     const dismiss = html(doc, "button");
@@ -120,7 +120,6 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     let live = true;
     let pending = false;
     let forwarding = false;
-    let forwardedText = "";
     let originalDraft = "";
     let sendWatch = 0;
     let layoutFrame = 0;
@@ -134,7 +133,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
 
     function recordDraft() {
       if (!current) return;
-      if (!forwardedText || current.input.value !== forwardedText) draft = current.input.value.slice(0, 20000);
+      draft = current.input.value.slice(0, 20000);
       suggestions.hidden = Boolean(draft.trim());
       error.textContent = "";
     }
@@ -162,7 +161,6 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       live = false;
       if (current && conversationAt(container, itemID)?.key === current.key) {
         if (!sent && !pending) recordDraft();
-        if (forwardedText && current.input.value === forwardedText) write(current.input, draft);
       }
       win.cancelAnimationFrame(layoutFrame);
       win.clearInterval(sendWatch);
@@ -260,6 +258,115 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       if (count() < expected) throw new Error("原版输入栏未能添加来源截图，请检查当前模型是否支持图像。");
     }
 
+    function dismissSelectionPopup(chat: HTMLElement) {
+      const promptInput = chat.querySelector<HTMLTextAreaElement>(".llm-assistant-selection-prompt-input");
+      promptInput?.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: false, cancelable: true }));
+      chat.querySelector("#llm-chat-box")?.dispatchEvent(new win.Event("scroll"));
+    }
+
+    function removeAddedQuoteChips(target: NonNullable<ReturnType<typeof locate>>, count: number) {
+      for (let removed = 0; removed < count; removed++) {
+        const chips = target.section.querySelectorAll<HTMLElement>("#llm-selected-context-list .llm-selected-context");
+        const last = chips[chips.length - 1];
+        const clear = last?.querySelector<HTMLButtonElement>(".llm-selected-context-clear");
+        if (!clear) break;
+        clear.click();
+      }
+    }
+
+    async function includeQuotes(target: NonNullable<ReturnType<typeof locate>>, quotes: string[]) {
+      if (!quotes.length) return { ok: false, added: 0 };
+      const chatBox = target.chat.querySelector<HTMLElement>("#llm-chat-box");
+      const bubble = chatBox?.querySelector<HTMLElement>('[data-message-role="assistant"] .llm-bubble.assistant:not(.streaming)');
+      const popup = target.chat.querySelector<HTMLElement>(".llm-assistant-selection-popup");
+      const quoteButton = popup?.querySelector<HTMLButtonElement>(".llm-assistant-selection-action:not(.llm-assistant-selection-side-action)");
+      if (!chatBox || !bubble || !popup || !quoteButton) return { ok: false, added: 0 };
+      const chipCount = () => target.section.querySelectorAll("#llm-selected-context-list .llm-selected-context").length;
+      if (chipCount() + quotes.length > 5) return { ok: false, added: 0 };
+      let added = 0;
+      for (const [index, snippet] of quotes.entries()) {
+        dismissSelectionPopup(target.chat);
+        const selection = win.getSelection();
+        if (!selection) {
+          removeAddedQuoteChips(target, added);
+          return { ok: false, added: 0 };
+        }
+        const savedRanges: Range[] = [];
+        for (let i = 0; i < selection.rangeCount; i++) savedRanges.push(selection.getRangeAt(i).cloneRange());
+        const probe = html(doc, "span");
+        probe.style.cssText = "position:fixed;left:-99999px;top:0;opacity:0;visibility:visible;pointer-events:none;white-space:pre-wrap;user-select:text;-moz-user-select:text;";
+        probe.textContent = snippet;
+        const needsProbe = chatBox.getClientRects().length === 0;
+        let ok = false;
+        try {
+          if (needsProbe) target.chat.setAttribute("data-zcanvas-quote-probe", "");
+          bubble.append(probe);
+          const range = doc.createRange();
+          range.selectNodeContents(probe);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          if (!selection.isCollapsed) {
+            const before = chipCount();
+            quoteButton.click();
+            const after = chipCount();
+            const expanded = popup.classList.contains("is-expanded");
+            if (after > before) {
+              added += after - before;
+              ok = true;
+            } else if (expanded) {
+              ok = true;
+            }
+          }
+        } finally {
+          probe.remove();
+          selection.removeAllRanges();
+          for (const range of savedRanges) {
+            try {
+              if (range.startContainer.isConnected && range.endContainer.isConnected) selection.addRange(range);
+            } catch { /* ignore stale range */ }
+          }
+          if (needsProbe) target.chat.removeAttribute("data-zcanvas-quote-probe");
+          dismissSelectionPopup(target.chat);
+        }
+        if (!ok) {
+          removeAddedQuoteChips(target, added);
+          return { ok: false, added: 0 };
+        }
+        if (index + 1 < quotes.length) await Zotero.Promise.delay(20);
+      }
+      target.input.focus({ preventScroll: true });
+      return { ok: true, added };
+    }
+
+    function removeAddedMarkdownFile(target: NonNullable<ReturnType<typeof locate>>, fileName: string) {
+      const rows = Array.from(target.section.querySelectorAll("#llm-file-context-list .llm-file-context-item")) as HTMLElement[];
+      for (const row of rows) {
+        if (row.querySelector(".llm-file-context-name")?.textContent?.trim() === fileName) {
+          row.querySelector<HTMLButtonElement>(".llm-file-context-remove")?.click();
+          return;
+        }
+      }
+    }
+
+    async function includeMarkdownFile(target: NonNullable<ReturnType<typeof locate>>, markdown: string) {
+      if (!markdown.trim()) return undefined;
+      const names = Array.from(target.section.querySelectorAll("#llm-file-context-list .llm-file-context-name")) as Element[];
+      const existingNames = new Set(names.map((node) => (node.textContent || "").trim().toLowerCase()));
+      let fileName = "canvas-context.md";
+      for (let suffix = 2; existingNames.has(fileName.toLowerCase()); suffix++) {
+        fileName = `canvas-context-${suffix}.md`;
+      }
+      const count = () => target.section.querySelectorAll("#llm-file-context-list .llm-file-context-item").length;
+      const expected = count() + 1;
+      const files = new win.DataTransfer();
+      files.items.add(new win.File([markdown], fileName, { type: "text/markdown" }));
+      target.input.dispatchEvent(new win.ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: files }));
+      const deadline = Date.now() + 6000;
+      while (live && current === target && count() < expected && Date.now() < deadline) await Zotero.Promise.delay(50);
+      if (count() < expected) throw new Error("原版输入栏未能添加画布上下文附件，请重试。");
+      return fileName;
+    }
+
     function onSend(event: Event) {
       const target = current;
       if (!target || forwarding || !target.send.contains(event.target as Node)) return;
@@ -283,25 +390,53 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
         return;
       }
       pending = true;
-      void session.submitNativeBranch(command.parents, text.slice(0, 20000), command.quote, target.key, async (message, images) => {
-        await includeImages(target, images);
-        if (!live || current !== target || locate()?.key !== target.key ||
-            target.input.value.trim() !== text || target.send.disabled || !target.send.getClientRects().length) {
-          throw new Error("提问框或对话已切换，请重新发送。");
+      void session.submitNativeBranch(command.parents, text.slice(0, 20000), command.quote, target.key, async (payload) => {
+        let addedQuotes = 0;
+        let addedFile: string | undefined;
+        const rollback = () => {
+          if (addedQuotes) removeAddedQuoteChips(target, addedQuotes);
+          if (addedFile) removeAddedMarkdownFile(target, addedFile);
+        };
+        try {
+          await includeImages(target, payload.images);
+          const quoted = await includeQuotes(target, payload.quotes);
+          addedQuotes = quoted.added;
+          if (!quoted.ok && payload.markdown.trim()) {
+            addedFile = await includeMarkdownFile(target, payload.markdown);
+          }
+          if (!live || current !== target || locate()?.key !== target.key ||
+              target.input.value.trim() !== text || target.send.disabled || !target.send.getClientRects().length) {
+            throw new Error("提问框或对话已切换，请重新发送。");
+          }
+          const userIndices = () => (Array.from(target.chat.querySelectorAll('#llm-chat-box > [data-message-role="user"]')) as HTMLElement[])
+            .map((node) => Number(node.dataset.messageIndex))
+            .filter((index) => Number.isSafeInteger(index) && index >= 0);
+          const previousMax = Math.max(-1, ...userIndices());
+          const sentValue = target.input.value;
+          forwarding = true;
+          try { target.send.click(); } finally { forwarding = false; }
+          const deadline = Date.now() + 6000;
+          while (live && target.input.value === sentValue && Date.now() < deadline) await Zotero.Promise.delay(50);
+          if (target.input.value === sentValue) {
+            throw new Error("原版输入栏未接受这次提问，请检查当前运行时后重试。");
+          }
+          let messageIndex: number | undefined;
+          const indexDeadline = Date.now() + 250;
+          while (Date.now() < indexDeadline) {
+            const next = userIndices().findLast((index) => index > previousMax);
+            if (next !== undefined) {
+              messageIndex = next;
+              break;
+            }
+            await Zotero.Promise.delay(25);
+          }
+          if (!live) throw new Error("提问框已关闭。");
+          cleanup(true);
+          return { messageIndex };
+        } catch (cause) {
+          rollback();
+          throw cause;
         }
-        forwardedText = message;
-        target.input.value = message;
-        forwarding = true;
-        try { target.send.click(); } finally { forwarding = false; }
-        const deadline = Date.now() + 6000;
-        while (live && target.input.value === message && Date.now() < deadline) await Zotero.Promise.delay(50);
-        if (target.input.value === message) {
-          write(target.input, draft);
-          forwardedText = "";
-          throw new Error("原版输入栏未接受这次提问，请检查当前运行时后重试。");
-        }
-        if (!live) throw new Error("提问框已关闭。");
-        cleanup(true);
       }, () => target.chat.querySelector<HTMLButtonElement>("#llm-cancel")?.click())
         .catch((cause) => { error.textContent = errorMessage(cause); })
         .finally(() => { pending = false; });

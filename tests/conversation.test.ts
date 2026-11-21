@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ancestors, conversationCards, emptyDocument } from "../shared/graph.ts";
-import { readNativePrompt } from "../shared/question.ts";
+import { nativeBranchPrompt, readNativePrompt } from "../shared/question.ts";
 import { documentSchema, settingsSchema, type CanvasDocument, type Reference, type Settings } from "../shared/schema.ts";
-import { CanvasSession, initialSettings } from "../src/session.ts";
+import { CanvasSession, initialSettings, type NativeBranchSubmission } from "../src/session.ts";
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
   const paper: Reference = {
@@ -58,37 +58,73 @@ test("conversation backfill preserves existing cards and updates them across lay
     assert.deepEqual(projected.map((card) => [card.id, card.parents]), [
       ["existing-response", []], ["existing-branch", ["existing-response"]],
     ]);
-    let outbound = "";
+    let submission!: NativeBranchSubmission;
     await session.syncConversation([{ ...earlier, answer: "x".repeat(64500) }, later]);
-    await session.submitNativeBranch(["existing-response"], "Why?", "A selected phrase", 20, async (text) => { outbound = text; }, () => {});
-    assert.match(outbound, /本次追问选中的文字：\nA selected phrase/);
-    assert.match(outbound, /Updated original reply/);
-    assert.ok(outbound.indexOf("A selected phrase") < outbound.indexOf("Earlier question"));
-    const { branchID, question } = readNativePrompt(outbound);
-    assert.ok(branchID);
-    assert.equal(question, "Why?");
-    await session.syncConversation([{ id: "20:300", branchID, prompt: question, answer: "Native answer", sources: [] }], true);
+    const quotedBranchID = await session.submitNativeBranch(["existing-response"], "Why?", "A selected phrase", 10, async (payload) => {
+      submission = payload;
+      return { messageIndex: 4 };
+    }, () => {});
+    assert.equal(submission.prompt, "Why?");
+    assert.deepEqual(submission.quotes, ["A selected phrase"]);
+    assert.match(submission.markdown, /本次追问选中的文字：\nA selected phrase/);
+    assert.match(submission.markdown, /Updated original reply/);
+    assert.ok(submission.markdown.indexOf("A selected phrase") < submission.markdown.indexOf("Earlier question"));
+    assert.ok(!submission.markdown.includes("画布参考材料（分支"));
+    await session.syncConversation([{ id: "10:300", messageIndex: 4, prompt: "Why?", answer: "Native answer", sources: [] }], true);
     const native = (await session.ready()).document.cards;
     assert.equal(native.filter((card) => card.importedTurn).length, 2);
-    assert.deepEqual(native.find((card) => card.id === branchID)?.parents, ["existing-response"]);
-    assert.equal(native.find((card) => card.id === branchID)?.answer, "Native answer");
-    assert.equal(native.find((card) => card.id === branchID)?.status, "done");
-    assert.ok(conversationCards(native, new Set(["20:300"]), 20, new Set([branchID])).some((card) => card.id === branchID));
-    await session.submitNativeBranch(["existing-response"], "Explain this", undefined, 20, async (text) => { outbound = text; }, () => {});
-    assert.match(outbound, /本次追问的来源卡片：\n\n### #2 Later question[\s\S]*Updated original reply/);
-    assert.ok(outbound.indexOf("Updated original reply") < outbound.indexOf("Earlier question"));
-    await session.syncConversation([{
-      id: "20:301", branchID: readNativePrompt(outbound).branchID,
-      prompt: "Explain this", answer: "Explanation", sources: [],
-    }], true);
+    assert.deepEqual(native.find((card) => card.id === quotedBranchID)?.parents, ["existing-response"]);
+    assert.equal(native.find((card) => card.id === quotedBranchID)?.answer, "Native answer");
+    assert.equal(native.find((card) => card.id === quotedBranchID)?.nativeTurn, "10:300");
+    assert.equal(native.find((card) => card.id === quotedBranchID)?.status, "done");
+    assert.ok(conversationCards(native, new Set(["10:100", "10:200", "10:300"]), 10).some((card) => card.id === quotedBranchID));
 
-    const oldTail = { id: "10:400", prompt: "Discarded question", answer: "Discarded answer", sources: [] };
-    await session.syncConversation([earlier, later, oldTail]);
+    // Editing a native branch in LLM for Zotero replaces the same branch card in place
+    await session.syncConversation([
+      earlier, later,
+      { id: "10:350", messageIndex: 4, prompt: "Why really?", answer: "Edited native answer", sources: [] },
+    ]);
+    const afterBranchEdit = (await session.ready()).document.cards;
+    assert.equal(afterBranchEdit.filter((card) => card.importedTurn).length, 2);
+    assert.equal(afterBranchEdit.find((card) => card.id === quotedBranchID)?.prompt, "Why really?");
+    assert.equal(afterBranchEdit.find((card) => card.id === quotedBranchID)?.answer, "Edited native answer");
+    assert.equal(afterBranchEdit.find((card) => card.id === quotedBranchID)?.nativeTurn, "10:350");
+
+    // Branching a whole card in the same conversation quotes the parent card answer directly
+    const wholeCardBranchID = await session.submitNativeBranch(["existing-response"], "Explain this", undefined, 10, async (payload) => {
+      submission = payload;
+      return { messageIndex: 6 };
+    }, () => {});
+    assert.equal(submission.prompt, "Explain this");
+    assert.deepEqual(submission.quotes, ["Updated original reply"]);
+    assert.match(submission.markdown, /本次追问的来源卡片：\n\n### #2 Later question[\s\S]*Updated original reply/);
+    assert.ok(submission.markdown.indexOf("Updated original reply") < submission.markdown.indexOf("Earlier question"));
+    await session.syncConversation([{
+      id: "10:360", messageIndex: 6, prompt: "Explain this", answer: "Explanation", sources: [],
+    }], true);
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === wholeCardBranchID)?.nativeTurn, "10:360");
+
+    // Legacy branch prompt marker remains readable
+    const legacyPrompt = nativeBranchPrompt(wholeCardBranchID, "Legacy?", "context");
+    assert.deepEqual(readNativePrompt(legacyPrompt).question, "Legacy?");
+    assert.equal(readNativePrompt(legacyPrompt).branchID, wholeCardBranchID);
+
+    const oldTail = { id: "10:400", messageIndex: 8, prompt: "Discarded question", answer: "Discarded answer", sources: [] };
+    await session.syncConversation([
+      earlier, later,
+      { id: "10:350", messageIndex: 4, prompt: "Why really?", answer: "Edited native answer", sources: [] },
+      { id: "10:360", messageIndex: 6, prompt: "Explain this", answer: "Explanation", sources: [] },
+      oldTail,
+    ]);
     const tailID = (await session.ready()).document.cards.find((card) => card.importedTurn === oldTail.id)!.id;
-    await session.submitNativeBranch([tailID], "Discarded follow-up", undefined, 10, async (text) => { outbound = text; }, () => {});
-    const discardedBranch = readNativePrompt(outbound).branchID!;
-    const oldBranch = { id: "10:500", branchID: discardedBranch, prompt: "Discarded follow-up", answer: "Follow-up answer", sources: [] };
-    await session.syncConversation([earlier, later, oldTail, oldBranch]);
+    const discardedBranch = await session.submitNativeBranch([tailID], "Discarded follow-up", undefined, 10, async () => ({ messageIndex: 10 }), () => {});
+    const oldBranch = { id: "10:500", messageIndex: 10, prompt: "Discarded follow-up", answer: "Follow-up answer", sources: [] };
+    await session.syncConversation([
+      earlier, later,
+      { id: "10:350", messageIndex: 4, prompt: "Why really?", answer: "Edited native answer", sources: [] },
+      { id: "10:360", messageIndex: 6, prompt: "Explain this", answer: "Explanation", sources: [] },
+      oldTail, oldBranch,
+    ]);
     await session.command({ type: "move", positions: [{ id: "existing-response", x: 75, y: 120 }] });
     const edited = { id: "10:600", messageIndex: 2, prompt: "Edited question", answer: "Regenerated answer", sources: [] };
     const active = new Set([earlier.id, edited.id]);
@@ -109,6 +145,65 @@ test("conversation backfill preserves existing cards and updates them across lay
     await assertRewrite(75);
     await session.command({ type: "undo" });
     await assertRewrite(42);
+  } finally {
+    await session.close();
+  }
+});
+
+test("manual model quotes in the paper chat attach as branches without breaking the main spine", async () => {
+  const paper: Reference = {
+    uri: "zotero://select/library/items/ABCDEFGH",
+    title: "Fixture", authors: "", year: "", abstract: "",
+  };
+  const session = new CanvasSession({
+    paper,
+    load: async () => null,
+    save: async (document) => { documentSchema.parse(document); },
+    getSettings: initialSettings,
+    setSettings: () => {},
+    generate: async function* () {},
+    controller: () => new AbortController(),
+    image: async () => null,
+    open: () => {},
+    search: async () => [],
+    reference: async () => paper,
+    note: async () => "",
+  });
+  try {
+    const turn1 = { id: "30:100", messageIndex: 0, prompt: "First", answer: "AFL uses edge coverage with a 64 KiB bitmap.", sources: [] };
+    const turn2 = { id: "30:200", messageIndex: 2, prompt: "Second", answer: "Self-loops collapse to zero without right shift.", sources: [] };
+    const manualQuote = {
+      id: "30:300", messageIndex: 4, prompt: "Explain bitmap",
+      quotedTexts: ["edge coverage with a 64 KiB bitmap"],
+      answer: "Each slot counts edge hits.", sources: [],
+    };
+    const turn3 = { id: "30:400", messageIndex: 6, prompt: "Third", answer: "Main line continues.", sources: [] };
+    const manualSynthesis = {
+      id: "30:500", messageIndex: 8, prompt: "Compare both",
+      quotedTexts: ["64 KiB bitmap", "Self-loops collapse to zero"],
+      answer: "Combined explanation.", sources: [],
+    };
+    await session.syncConversation([turn1, turn2, manualQuote, turn3, manualSynthesis]);
+    const { document } = await session.ready();
+    const byId = new Map(document.cards.map((card) => [card.id, card]));
+    assert.equal(byId.get("llm:30:300")?.kind, "branch");
+    assert.deepEqual(byId.get("llm:30:300")?.parents, ["llm:30:100"]);
+    assert.equal(byId.get("llm:30:300")?.nativeTurn, "30:300");
+    assert.equal(byId.get("llm:30:400")?.kind, "response");
+    assert.deepEqual(byId.get("llm:30:400")?.parents, ["llm:30:200"]);
+    assert.equal(byId.get("llm:30:500")?.kind, "synthesis");
+    assert.deepEqual(byId.get("llm:30:500")?.parents, ["llm:30:100", "llm:30:200"]);
+
+    // Subsequent sync keeps manual-quote branches stable and editing replaces in place
+    await session.syncConversation([
+      turn1, turn2,
+      { ...manualQuote, id: "30:350", prompt: "Explain bitmap deeply", answer: "Updated slot explanation." },
+      turn3, manualSynthesis,
+    ]);
+    const updated = (await session.ready()).document.cards.find((card) => card.id === "llm:30:300");
+    assert.equal(updated?.nativeTurn, "30:350");
+    assert.equal(updated?.answer, "Updated slot explanation.");
+    assert.deepEqual(updated?.parents, ["llm:30:100"]);
   } finally {
     await session.close();
   }

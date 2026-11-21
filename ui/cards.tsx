@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, RefreshCw, Square } from "lucide-react";
+import { ArrowDown, ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, RefreshCw, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -20,6 +20,7 @@ const kinds = {
 
 export const cardActions = createContext<{
   call: Bridge["call"];
+  lastMainId?: string;
   ask(id: string, anchor: () => DOMRect | undefined, quote?: string, trigger?: HTMLButtonElement): void;
   expand(id: string, trigger: HTMLButtonElement): void;
 }>(null!);
@@ -200,8 +201,9 @@ export function CardPreview({ card, bridge, close, children }: {
 }
 
 export function CardNode({ data: card }: NodeProps<FlowCard>) {
-  const { ask, call, expand } = useContext(cardActions);
+  const { ask, call, expand, lastMainId } = useContext(cardActions);
   const { icon: Icon, label } = kinds[card.kind];
+  const continuesMain = Boolean(lastMainId && card.id === lastMainId);
 
   return (
     <article className={`card card-${card.kind}`}>
@@ -233,7 +235,7 @@ export function CardNode({ data: card }: NodeProps<FlowCard>) {
             <button className="nodrag" onClick={(event) => {
               const trigger = event.currentTarget;
               ask(card.id, () => trigger.isConnected ? trigger.getBoundingClientRect() : undefined, undefined, trigger);
-            }}><ArrowDownRight size={14} />追问</button>
+            }}>{continuesMain ? <><ArrowDown size={14} />继续对话</> : <><ArrowDownRight size={14} />追问</>}</button>
           </>}
         {card.reference && <button className="nodrag" onClick={() => void call({ type: "source", id: card.id })}><ArrowUpRight size={14} />查看文献</button>}
       </footer>

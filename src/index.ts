@@ -90,7 +90,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
     const entries = turns.map((turn) => ({
       id: `${key}:${turn.timestamp}`, prompt: turn.question || "论文对话", answer: turn.answer,
       sources: sourceAnchors(paper, turn.sources), messageIndex: turn.messageIndex,
-      stopped: turn.stopped, branchID: turn.branchID,
+      stopped: turn.stopped, branchID: turn.branchID, quotedTexts: turn.quotedTexts,
     }));
     if (conversationKey !== key) citations.reset();
     if (!partial || conversationKey !== key) {
@@ -143,7 +143,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
           await syncing;
           const snapshot = await session.ready();
           const card = snapshot.document.cards.find((entry) => entry.id === command.id);
-          const turn = card?.importedTurn ?? branchTurns.get(command.id);
+          const turn = card?.importedTurn ?? card?.nativeTurn ?? branchTurns.get(command.id);
           value = connected && key === conversationKey && visibleIDs.has(command.id) && turn
             ? citations.read(turn) : null;
         } else if (command.type === "openAnswerCitation") {
