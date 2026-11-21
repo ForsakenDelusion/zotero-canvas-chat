@@ -62,25 +62,56 @@ function describe(card: Card): string {
   ].filter(Boolean).join("\n\n");
 }
 
-export async function messagesFor(
-  path: Card[], prompt: string, quote: string | undefined,
-  imageFor: (anchor: NonNullable<Card["anchor"]>) => Promise<string | null>,
-  merge: boolean,
-): Promise<Message[]> {
-  const material = await Promise.all(path.map(async (card) => {
+type ImageFor = (anchor: NonNullable<Card["anchor"]>) => Promise<string | null>;
+
+function materialFor(path: Card[], imageFor: ImageFor) {
+  return Promise.all(path.map(async (card) => {
     const image = card.anchor?.image ? await imageFor(card.anchor) : null;
     if (card.anchor?.image && !image) throw new Error(`PDF 第 ${card.anchor.page} 页的截图尚未缓存。请打开 PDF 后重试。`);
     return { card, image, text: describe(card) || card.title };
   }));
+}
+
+function numberedMaterial(material: Awaited<ReturnType<typeof materialFor>>) {
+  const labels = new Map(material.map(({ card }, index) => [card.id, index + 1]));
+  return material.map(({ card, text, image }, index) => {
+    const upstream = card.parents.map((parent) => `#${labels.get(parent)}`).join("、");
+    return {
+      id: card.id, image,
+      text: `### #${index + 1} ${card.title}${upstream ? `（来自 ${upstream}）` : ""}\n${text}${image ? "\n附对应的 PDF 区域截图。" : ""}${card.answer ? `\n回答：\n${card.answer}` : ""}`,
+    };
+  });
+}
+
+export async function nativeBranchContext(path: Card[], parents: Card[], quote: string | undefined, imageFor: ImageFor) {
+  const material = numberedMaterial(await materialFor(path, imageFor));
+  const parentIDs = new Set(parents.map((card) => card.id));
+  const focus = material.filter(({ id }) => parentIDs.has(id));
+  const history = material.filter(({ id }) => !parentIDs.has(id));
+  const selection = quote?.trim();
+  const heading = [
+    selection && `本次追问选中的文字：\n${selection}`,
+    "本次追问的来源卡片：",
+  ].filter(Boolean).join("\n\n");
+  const remaining = 60000 - heading.length;
+  const perCard = Math.floor(remaining / focus.length) - 2;
+  const sources = focus.map(({ text }) => text);
+  const excerpted = sources.join("\n\n").length <= remaining - 2
+    ? sources : sources.map((text) => text.slice(0, perCard));
+  const text = [heading, ...excerpted, ...(history.length ? ["较早的画布脉络：", ...history.map(({ text }) => text)] : [])]
+    .join("\n\n").slice(0, 60000).trimEnd();
+  return { text, images: [...focus, ...history].flatMap(({ image }) => image ? [image] : []) };
+}
+
+export async function messagesFor(
+  path: Card[], prompt: string, quote: string | undefined,
+  imageFor: ImageFor, merge: boolean,
+): Promise<Message[]> {
+  const material = await materialFor(path, imageFor);
   const question = quote ? `选中的文字：\n${quote}\n\n${prompt}` : prompt;
   if (merge) {
-    const labels = new Map(path.map((card, index) => [card.id, index + 1]));
-    const content = material.map(({ card, text, image }, index) => {
-      const upstream = card.parents.map((parent) => `#${labels.get(parent)}`).join("、");
-      return `### #${index + 1} ${card.title}${upstream ? `（来自 ${upstream}）` : ""}\n${text}${image ? "\n附对应的 PDF 区域截图。" : ""}${card.answer ? `\n回答：\n${card.answer}` : ""}`;
-    });
     return [{
-      role: "user", text: [...content, question].join("\n\n"),
+      role: "user", text: [...numberedMaterial(material).map(({ text }) => text), question].join("\n\n"),
       images: material.flatMap(({ image }) => image ? [image] : []),
     }];
   }

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, RefreshCw, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -70,27 +70,39 @@ function CardContent({ card, call, expanded = false }: { card: Card; call: Bridg
   </>;
 }
 
-export function CardPreview({ card, call, close }: { card: Card; call: Bridge["call"]; close: () => void }) {
+function SelectableCardBody({ card, expanded = false }: { card: Card; expanded?: boolean }) {
+  const { ask, call } = useContext(cardActions);
+
+  function inspectSelection(body: HTMLDivElement) {
+    const current = window.getSelection();
+    const text = current?.toString().trim();
+    if (!text || !current?.rangeCount || !body.contains(current.anchorNode)
+      || !body.contains(current.focusNode) || card.status === "streaming") return;
+    const range = current.getRangeAt(0).cloneRange();
+    ask(card.id, () => range.startContainer.isConnected ? range.getBoundingClientRect() : undefined, text.slice(0, 50000));
+  }
+
+  return <div className={expanded ? "card-body card-preview-body" : "card-body nodrag nowheel"}
+    role={expanded ? "region" : undefined} aria-label={expanded ? "卡片内容" : undefined} tabIndex={expanded ? 0 : undefined}
+    onMouseUp={(event) => {
+      if (event.button === 0) inspectSelection(event.currentTarget);
+    }} onKeyUp={(event) => {
+      if (event.shiftKey && /^(Arrow|Home|End|Page)/.test(event.key)) inspectSelection(event.currentTarget);
+    }}>
+    <CardContent card={card} call={call} expanded={expanded} />
+  </div>;
+}
+
+export function CardPreview({ card, close, children }: { card: Card; close: () => void; children?: ReactNode }) {
   return <Dialog className="card-preview" title={kinds[card.kind].label} close={close}>
-    <div className="card-body card-preview-body" role="region" aria-label="卡片内容" tabIndex={0}>
-      <CardContent card={card} call={call} expanded />
-    </div>
+    <SelectableCardBody card={card} expanded />
+    {children}
   </Dialog>;
 }
 
 export function CardNode({ data: card }: NodeProps<FlowCard>) {
   const { ask, call, expand } = useContext(cardActions);
-  const body = useRef<HTMLDivElement>(null);
   const { icon: Icon, label } = kinds[card.kind];
-
-  function inspectSelection() {
-    const current = window.getSelection();
-    const text = current?.toString().trim();
-    if (!text || !current?.rangeCount || !body.current?.contains(current.anchorNode)
-      || !body.current.contains(current.focusNode) || card.status === "streaming") return;
-    const range = current.getRangeAt(0).cloneRange();
-    ask(card.id, () => range.startContainer.isConnected ? range.getBoundingClientRect() : undefined, text.slice(0, 50000));
-  }
 
   return (
     <article className={`card card-${card.kind}`}>
@@ -113,13 +125,7 @@ export function CardNode({ data: card }: NodeProps<FlowCard>) {
         </div>
       </header>
       <h2>{card.title}</h2>
-      <div className="card-body nodrag nowheel" ref={body} onMouseUp={(event) => {
-        if (event.button === 0) inspectSelection();
-      }} onKeyUp={(event) => {
-        if (event.shiftKey && /^(Arrow|Home|End|Page)/.test(event.key)) inspectSelection();
-      }}>
-        <CardContent card={card} call={call} />
-      </div>
+      <SelectableCardBody card={card} />
       <footer className="card-foot">
         {card.status === "streaming" ?
           <button className="nodrag" onClick={() => void call({ type: "stop", id: card.id })}><Square size={13} />停止</button>

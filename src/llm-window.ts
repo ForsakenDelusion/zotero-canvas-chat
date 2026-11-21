@@ -1,4 +1,5 @@
 import { errorMessage } from "../shared/schema";
+import { readNativePrompt } from "../shared/question";
 import { companionGlobals } from "./companion";
 import { parentPaper } from "./library";
 
@@ -14,6 +15,7 @@ const chatBody = `.llm-standalone-content ${paperChat}`;
 const readerChat = `#zotero-context-pane-item-deck ${paperChat}, item-details[tabType="reader"] ${paperChat}`;
 const sidebarToggle = ".llm-standalone-side-panel-toggle";
 const legacyTransferButton = ".llm-message-actions .llm-message-action-canvas";
+const branchContext = ".zcanvas-branch-context";
 const html = "http://www.w3.org/1999/xhtml";
 
 function element(doc: Document, name: "button", text: string): HTMLButtonElement;
@@ -31,6 +33,30 @@ function paperIDFor(chat: HTMLElement | null) {
 
 function removeLegacyTransferButtons(doc: Document) {
   doc.querySelectorAll(legacyTransferButton).forEach((button) => button.remove());
+}
+
+function compactBranchBubbles(doc: Document) {
+  doc.querySelectorAll(`${paperChat} .llm-bubble.user`).forEach((bubble) => {
+    const node = bubble.firstChild;
+    if (bubble.childNodes.length !== 1 || node?.nodeType !== 3) return;
+    const text = node as Text;
+    const { contextOffset } = readNativePrompt(text.data);
+    if (contextOffset === undefined) return;
+    const material = element(doc, "span");
+    material.className = branchContext.slice(1);
+    material.style.display = "none";
+    material.textContent = text.data.slice(contextOffset);
+    text.deleteData(contextOffset, text.length - contextOffset);
+    bubble.append(material);
+  });
+}
+
+function restoreBranchBubbles(doc: Document) {
+  doc.querySelectorAll(branchContext).forEach((material) => {
+    const bubble = material.parentNode;
+    material.replaceWith(material.textContent ?? "");
+    bubble?.normalize();
+  });
 }
 
 function attachReader(win: HostWindow, receiver: Receiver) {
@@ -58,6 +84,7 @@ function attachReader(win: HostWindow, receiver: Receiver) {
   function sync() {
     frame = 0;
     removeLegacyTransferButtons(doc);
+    compactBranchBubbles(doc);
     for (const [chat, entry] of mounted) {
       if (chat.isConnected && entry.button.isConnected && chat.matches(readerChat) && paperIDFor(chat) === entry.id) continue;
       entry.dispose();
@@ -116,6 +143,7 @@ function attachReader(win: HostWindow, receiver: Receiver) {
       observer.disconnect();
       win.cancelAnimationFrame(frame);
       for (const entry of mounted.values()) entry.dispose();
+      restoreBranchBubbles(doc);
       css.remove();
     },
   };
@@ -264,6 +292,7 @@ function attach(win: HostWindow, receiver: Receiver) {
   function sync() {
     frame = 0;
     removeLegacyTransferButtons(doc);
+    compactBranchBubbles(doc);
     const nextPanel = doc.querySelector<HTMLElement>(rightPanel);
     const nextPaperID = paperID();
     const navigation = doc.querySelector(".llm-standalone-primary-nav");
@@ -343,6 +372,7 @@ function attach(win: HostWindow, receiver: Receiver) {
     launch.remove();
     navButton.remove();
     topButton.remove();
+    restoreBranchBubbles(doc);
     css.remove();
   }
   return { open, dispose };

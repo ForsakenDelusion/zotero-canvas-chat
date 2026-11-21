@@ -59,9 +59,11 @@ test("conversation backfill preserves existing cards and updates them across lay
       ["existing-response", []], ["existing-branch", ["existing-response"]],
     ]);
     let outbound = "";
+    await session.syncConversation([{ ...earlier, answer: "x".repeat(64500) }, later]);
     await session.submitNativeBranch(["existing-response"], "Why?", "A selected phrase", 20, async (text) => { outbound = text; }, () => {});
-    assert.match(outbound, /A selected phrase/);
+    assert.match(outbound, /本次追问选中的文字：\nA selected phrase/);
     assert.match(outbound, /Updated original reply/);
+    assert.ok(outbound.indexOf("A selected phrase") < outbound.indexOf("Earlier question"));
     const { branchID, question } = readNativePrompt(outbound);
     assert.ok(branchID);
     assert.equal(question, "Why?");
@@ -72,6 +74,9 @@ test("conversation backfill preserves existing cards and updates them across lay
     assert.equal(native.find((card) => card.id === branchID)?.answer, "Native answer");
     assert.equal(native.find((card) => card.id === branchID)?.status, "done");
     assert.ok(conversationCards(native, new Set(["20:300"]), 20).some((card) => card.id === branchID));
+    await session.submitNativeBranch(["existing-response"], "Explain this", undefined, 20, async (text) => { outbound = text; }, () => {});
+    assert.match(outbound, /本次追问的来源卡片：\n\n### #2 Later question[\s\S]*Updated original reply/);
+    assert.ok(outbound.indexOf("Updated original reply") < outbound.indexOf("Earlier question"));
   } finally {
     await session.close();
   }

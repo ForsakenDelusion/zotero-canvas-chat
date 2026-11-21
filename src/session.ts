@@ -1,4 +1,4 @@
-import { ancestors, emptyDocument, messagesFor, nextPosition, paperContext, type Message } from "../shared/graph";
+import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPosition, paperContext, type Message } from "../shared/graph";
 import { nativeBranchPrompt } from "../shared/question";
 import {
   defaultSettings, documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
@@ -249,9 +249,8 @@ export class CanvasSession {
         kind: parents.length > 1 ? "synthesis" : "branch", title: prompt.slice(0, 80),
         prompt, quote, nativeBranch: conversationKey, status: "streaming",
       }, parents);
-      const messages = await messagesFor(path, "", quote, (anchor) => this.host.image(anchor), true);
-      const context = messages[0].text.trim();
-      await send(nativeBranchPrompt(card.id, prompt, context.slice(0, 60000)), messages[0].images ?? []);
+      const context = await nativeBranchContext(path, parents, quote, (anchor) => this.host.image(anchor));
+      await send(nativeBranchPrompt(card.id, prompt, context.text), context.images);
       const timeout = setTimeout(() => {
         void this.serial(() => this.finishNativeBranch(card.id, { status: "stopped" })).catch(() => undefined);
       }, 300_000);

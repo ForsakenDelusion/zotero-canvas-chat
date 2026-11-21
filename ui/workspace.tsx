@@ -282,7 +282,10 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   }
 
   const close = () => {
-    if (typeof modal === "object") modal.trigger.focus({ preventScroll: true });
+    if (typeof modal === "object") {
+      setQuestion(undefined);
+      modal.trigger.focus({ preventScroll: true });
+    }
     setModal(undefined);
   };
   const preview = typeof modal === "object" ? cards.find((card) => card.id === modal.cardId) : undefined;
@@ -295,6 +298,24 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   function askFromButton(parents: string[], trigger: HTMLButtonElement) {
     openQuestion(parents, () => trigger.isConnected ? trigger.getBoundingClientRect() : undefined, undefined, trigger);
   }
+
+  const questionForm = composer && <QuestionComposer key={composer.draftKey} composer={composer} source={composer.source} blocked={blocked}
+    mainConversation={mainConversation} draft={drafts.current.get(composer.draftKey) ?? ""}
+    updateDraft={(prompt) => {
+      if (prompt) drafts.current.set(composer.draftKey, prompt);
+      else drafts.current.delete(composer.draftKey);
+    }}
+    close={() => setQuestion((current) => current === composer ? undefined : current)}
+    submit={async (prompt) => {
+      if (!composer.parents.length && composer.conversationKey) {
+        await bridge.call({ type: "askConversation", key: composer.conversationKey, prompt });
+        report("已发送到论文对话。");
+      } else {
+        await bridge.call({ type: "branch", parents: composer.parents, quote: composer.quote, prompt });
+      }
+      if (drafts.current.get(composer.draftKey)?.trim() === prompt) drafts.current.delete(composer.draftKey);
+      setQuestion((current) => current === composer ? undefined : current);
+    }} />;
 
   return <div className="shell">
     <header className="topbar">
@@ -370,24 +391,9 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
         </div>}
       </main>
     </div>
-    {composer && <QuestionComposer key={composer.draftKey} composer={composer} source={composer.source} blocked={blocked}
-      mainConversation={mainConversation} draft={drafts.current.get(composer.draftKey) ?? ""}
-      updateDraft={(prompt) => {
-        if (prompt) drafts.current.set(composer.draftKey, prompt);
-        else drafts.current.delete(composer.draftKey);
-      }}
-      close={() => setQuestion((current) => current === composer ? undefined : current)}
-      submit={async (prompt) => {
-        if (!composer.parents.length && composer.conversationKey) {
-          await bridge.call({ type: "askConversation", key: composer.conversationKey, prompt });
-          report("已发送到论文对话。");
-        } else {
-          await bridge.call({ type: "branch", parents: composer.parents, quote: composer.quote, prompt });
-        }
-        if (drafts.current.get(composer.draftKey)?.trim() === prompt) drafts.current.delete(composer.draftKey);
-        setQuestion((current) => current === composer ? undefined : current);
-      }} />}
-    {preview && <CardPreview key={preview.id} card={preview} call={bridge.call} close={close} />}
+    {preview ? <cardActions.Provider value={actions}>
+      <CardPreview key={preview.id} card={preview} close={close}>{questionForm}</CardPreview>
+    </cardActions.Provider> : questionForm}
     {modal === "settings" && <SettingsDialog value={snapshot.settings} companionAvailable={snapshot.companionAvailable} close={close}
       save={(settings, key) => bridge.call({ type: "settings", settings, key })} />}
     {modal === "library" && <LibraryDialog call={bridge.call} close={close} />}

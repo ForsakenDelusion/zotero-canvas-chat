@@ -1,5 +1,4 @@
 import { useLayoutEffect, useEffect, useRef, useState, type FormEvent } from "react";
-import { createPortal } from "react-dom";
 import { useViewport } from "@xyflow/react";
 import { ArrowUp, GitFork, LoaderCircle, MessageSquare, X } from "lucide-react";
 import { questionSuggestions } from "../shared/question";
@@ -99,7 +98,7 @@ export function QuestionComposer({ composer, source, mainConversation, blocked, 
     finally { setPending(false); }
   }
 
-  return createPortal(<form ref={panel} className="question-composer" aria-label={title} onSubmit={(event) => void send(event)}>
+  return <form ref={panel} className="question-composer" aria-label={title} onSubmit={(event) => void send(event)}>
     <div className="question-context">
       <Icon size={14} aria-hidden="true" />
       <strong>{title}</strong>
@@ -130,5 +129,5 @@ export function QuestionComposer({ composer, source, mainConversation, blocked, 
         {pending ? <LoaderCircle className="spin" size={17} /> : <ArrowUp size={17} />}
       </button>
     </div>
-  </form>, document.body);
+  </form>;
 }
