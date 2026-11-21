@@ -1,7 +1,7 @@
 import { conversationCards } from "../shared/graph";
 import { errorMessage, requestSchema, type Excerpt, type Snapshot } from "../shared/schema";
 import { hostColors, type CanvasTheme } from "../shared/theme";
-import { makeAnchor, parentPaper, zoteroHost } from "./library";
+import { makeAnchor, migrateLegacyNotes, parentPaper, zoteroHost } from "./library";
 import { conversationAt, observeConversation } from "./llm-turn";
 import { watchLLMWindows } from "./llm-window";
 import { nativeCitations } from "./native-citations";
@@ -221,6 +221,7 @@ function openFromReader(paper: Zotero.Item, excerpt?: Excerpt) {
 export function startup(id: string) {
   injectedUI = watchLLMWindows({ mountPaper });
   unregisterReader = readerHooks(id, openFromReader, llmForZoteroInstalled);
+  void migrateLegacyNotes().catch(() => undefined);
 }
 
 export async function shutdown() {
