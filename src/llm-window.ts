@@ -41,8 +41,20 @@ function paperIDFor(chat: HTMLElement | null) {
   return id > 0 ? parentPaper(Zotero.Items.get(id))?.id ?? 0 : 0;
 }
 
+function syncUserBubbleWidth(bubble: Element) {
+  const wrapper = bubble.closest<HTMLElement>(".llm-message-wrapper.user.llm-user-context-aligned");
+  if (!wrapper) return;
+  const width = Math.round(bubble.getBoundingClientRect().width);
+  if (width > 0) wrapper.style.setProperty("--llm-user-bubble-width", `${width}px`);
+  else wrapper.style.removeProperty("--llm-user-bubble-width");
+}
+
 function compactBranchBubbles(doc: Document) {
   doc.querySelectorAll(`${paperChat} .llm-bubble.user`).forEach((bubble) => {
+    if (bubble.querySelector(branchContext)) {
+      syncUserBubbleWidth(bubble);
+      return;
+    }
     const node = bubble.firstChild;
     if (bubble.childNodes.length !== 1 || node?.nodeType !== 3) return;
     const text = node as Text;
@@ -54,14 +66,16 @@ function compactBranchBubbles(doc: Document) {
     material.textContent = text.data.slice(contextOffset);
     text.deleteData(contextOffset, text.length - contextOffset);
     bubble.append(material);
+    syncUserBubbleWidth(bubble);
   });
 }
 
 function restoreBranchBubbles(doc: Document) {
   doc.querySelectorAll(branchContext).forEach((material) => {
-    const bubble = material.parentNode;
+    const bubble = material.parentElement;
     material.replaceWith(material.textContent ?? "");
     bubble?.normalize();
+    if (bubble) syncUserBubbleWidth(bubble);
   });
 }
 
@@ -76,6 +90,10 @@ function attachReader(win: HostWindow, receiver: Receiver) {
     }
     #llm-main .llm-header-actions > .zcanvas-reader-button:is(:hover, [aria-pressed="true"]) { background: var(--fill-quinary); }
     #llm-main[data-zcanvas-reader-active] > :not(.llm-header, .zcanvas-reader-content, [data-zcanvas-composer], [data-zcanvas-menu]) { display: none !important; }
+    #llm-main[data-zcanvas-reader-active][data-zcanvas-quote-probe] > #llm-chat-box {
+      display: block !important; position: fixed !important; left: -99999px !important; top: 0 !important;
+      width: 400px !important; opacity: 0 !important; pointer-events: none !important;
+    }
     .zcanvas-reader-content { position: relative; flex: 1; min-height: 0; min-width: 0; }
     .zcanvas-reader-content > iframe { position: absolute; inset: 0; }
     :root:not([data-llm-pane-view="chat"]) .zcanvas-reader-content {
