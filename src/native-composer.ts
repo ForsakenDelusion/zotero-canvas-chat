@@ -12,9 +12,11 @@ const menus = [
   ["#llm-reasoning-menu", "#llm-reasoning-toggle"],
   ["#llm-slash-menu", "#llm-upload-file"],
 ] as const;
+const historyNavigation = ".llm-standalone-sidebar .llm-standalone-conv-item, .llm-standalone-nav-new-chat, .llm-standalone-search-item";
 
 const styles = `
-  .llm-standalone-content-wrapper { z-index: 6000; overflow: visible; }
+  .llm-standalone-content-wrapper { overflow: visible; }
+  .llm-standalone-content-wrapper:not([data-zcanvas-workspace]) { z-index: 6000; }
   #llm-main > .llm-input-section[data-zcanvas-composer] {
     position: fixed !important; display: flex !important; inset: auto !important;
     left: var(--zcanvas-left) !important; top: var(--zcanvas-top) !important;
@@ -122,7 +124,6 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     let originalDraft = "";
     let sendWatch = 0;
     let layoutFrame = 0;
-    let mountedKey = first.key;
     const resize = new win.ResizeObserver(schedule);
     const observe = new win.MutationObserver(schedule);
 
@@ -159,11 +160,15 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     function cleanup(sent = false) {
       if (!live) return;
       live = false;
-      if (current && !sent && !pending) recordDraft();
-      if (current && forwardedText && current.input.value === forwardedText) write(current.input, draft);
+      if (current && conversationAt(container, itemID)?.key === current.key) {
+        if (!sent && !pending) recordDraft();
+        if (forwardedText && current.input.value === forwardedText) write(current.input, draft);
+      }
       win.cancelAnimationFrame(layoutFrame);
       win.clearInterval(sendWatch);
       doc.removeEventListener("keydown", escape);
+      doc.removeEventListener("click", closeOnHistoryNavigation, true);
+      doc.removeEventListener("keydown", closeOnHistoryNavigation, true);
       win.removeEventListener("resize", schedule);
       observe.disconnect();
       resize.disconnect();
@@ -179,7 +184,6 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
 
     function assign(target: NonNullable<ReturnType<typeof locate>>) {
       current = target;
-      mountedKey = current.key;
       current.section.setAttribute("data-zcanvas-composer", "");
       current.section.prepend(head);
       if (command.quote) head.after(quote);
@@ -202,7 +206,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
         layoutFrame = 0;
         const next = locate();
         if (!next || !iframe.isConnected) return;
-        if (next.section !== current?.section || mountedKey !== next.key) {
+        if (next.section !== current?.section || next.key !== current.key) {
           detach();
           assign(next);
         }
@@ -259,6 +263,12 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     function onSend(event: Event) {
       const target = current;
       if (!target || forwarding || !target.send.contains(event.target as Node)) return;
+      if (conversationAt(container, itemID)?.key !== target.key) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        cleanup();
+        return;
+      }
       const text = target.input.value.trim();
       const nativeCommand = text.startsWith("/") || target.section.querySelector("#llm-command-row[data-active]");
       if (!command.parents.length || nativeCommand) {
@@ -311,6 +321,11 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
           (current?.section.contains(event.target as Node) || doc.activeElement === iframe)) cleanup();
     }
 
+    function closeOnHistoryNavigation(event: Event) {
+      if (event.type === "keydown" && !["Enter", " "].includes((event as KeyboardEvent).key)) return;
+      if ((event.target as Element | null)?.closest?.(historyNavigation)) cleanup();
+    }
+
     active = { request: command.request, close: cleanup };
     assign(first);
     resize.observe(iframe);
@@ -320,6 +335,8 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     });
     win.addEventListener("resize", schedule);
     doc.addEventListener("keydown", escape);
+    doc.addEventListener("click", closeOnHistoryNavigation, true);
+    doc.addEventListener("keydown", closeOnHistoryNavigation, true);
     schedule();
     return true;
   }

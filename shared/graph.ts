@@ -19,15 +19,22 @@ export function ancestors(document: CanvasDocument, ids: string[]): Card[] {
   return document.cards.filter((card) => visited.has(card.id));
 }
 
-export function conversationCards(cards: Card[], turns: ReadonlySet<string>, conversationKey = 0): Card[] {
-  const sources = new Set(cards.filter((card) => card.nativeBranch === conversationKey).map((card) => card.id));
+export function conversationCards(
+  cards: Card[], turns: ReadonlySet<string>, conversationKey = 0, branches: ReadonlySet<string> = new Set(),
+): Card[] {
+  const activeBranches = new Set(cards.filter((card) =>
+    card.nativeBranch === conversationKey && (branches.has(card.id) || card.status === "streaming")).map((card) => card.id));
+  const sources = new Set(activeBranches);
   for (let index = cards.length - 1; index >= 0; index--) {
     const card = cards[index];
     if (sources.has(card.id)) for (const parent of card.parents) sources.add(parent);
   }
   const visible = new Set<string>();
+  const turnPrefix = `${conversationKey}:`;
   return cards.filter((card) => {
-    if ((card.importedTurn && !turns.has(card.importedTurn) && !sources.has(card.id)) ||
+    if ((card.nativeBranch === conversationKey && !activeBranches.has(card.id)) ||
+        (card.importedTurn && !turns.has(card.importedTurn) &&
+          (card.importedTurn.startsWith(turnPrefix) || !sources.has(card.id))) ||
         !card.parents.every((parent) => visible.has(parent))) return false;
     visible.add(card.id);
     return true;

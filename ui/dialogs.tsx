@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowUpRight, BookMarked, Search, X } from "lucide-react";
+import { ArrowUpRight, BookMarked, ChevronDown, Search, X } from "lucide-react";
 import type { Reference, Settings, Snapshot } from "../shared/schema";
 import type { Bridge } from "./bridge";
 
@@ -44,16 +44,21 @@ export function SettingsDialog({ value, companionAvailable, close, save }: {
   }
   return <Dialog title="模型设置" close={close}>
     <form onSubmit={(event) => void submit(event)}>
-      <label>服务商<select value={settings.provider} onChange={(event) => {
-        const provider = event.target.value as Settings["provider"];
-        setSettings({ ...settings, provider, endpoint: endpoints[provider] });
-        if (value.hasKey) setClearKey(true);
-      }}>
-        {(companionAvailable || companion) && <option value="llm-for-zotero">LLM for Zotero{companionAvailable ? "" : "（联动版未启用）"}</option>}
-        <option value="compatible">OpenAI 兼容（含 OpenRouter）</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="ollama">Ollama</option>
-      </select></label>
+      <label>服务商
+        <span className="provider-picker">
+          <select value={settings.provider} onChange={(event) => {
+            const provider = event.target.value as Settings["provider"];
+            setSettings({ ...settings, provider, endpoint: endpoints[provider] });
+            if (value.hasKey) setClearKey(true);
+          }}>
+            {(companionAvailable || companion) && <option value="llm-for-zotero">LLM for Zotero{companionAvailable ? "" : "（联动版未启用）"}</option>}
+            <option value="compatible">OpenAI 兼容（含 OpenRouter）</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <ChevronDown className="provider-chevron" size={15} aria-hidden="true" />
+        </span>
+      </label>
       {companion ? <p className="muted field-note">画布联动需要 LLM for Zotero 的默认 API 模型。主对话使用 Antigravity 时，请在这里选择 API 服务商并配置画布模型。</p> : <>
       <label>服务地址<input value={settings.endpoint} required maxLength={2048}
         onChange={(event) => {

@@ -3,16 +3,17 @@ import { readNativePrompt } from "../shared/question";
 
 const standaloneChat = ".llm-standalone-content #llm-main";
 
-function markdown(node: Node): string {
+function markdown(node: Node, citation?: (mark: Element) => string): string {
   if (node.nodeType === 3) return node.textContent || "";
   if (node.nodeType !== 1) return "";
   const element = node as Element;
+  if (element.matches(".llm-paper-cite-mark")) return citation?.(element) ?? "";
   if (element.matches("button, script, style, .llm-web-source-indicator, .llm-quote-card-citation")) return "";
   if (element.matches(".katex")) {
     const latex = element.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
     if (latex) return `$${latex}$`;
   }
-  const text = Array.from(element.childNodes, markdown).join("");
+  const text = ([...element.childNodes] as Node[]).map((child) => markdown(child, citation)).join("");
   const tag = element.localName;
   if (/^h[1-6]$/.test(tag)) return `\n\n${"#".repeat(Number(tag[1]))} ${text.trim()}\n\n`;
   switch (tag) {
@@ -37,6 +38,31 @@ function markdown(node: Node): string {
     }
     default: return text;
   }
+}
+
+function answerBlocks(message: Element) {
+  return [...message.querySelectorAll(".llm-assistant-answer, .llm-agent-inline-text")] as Element[];
+}
+
+export function answerMarkdown(blocks: Element[], citation?: (mark: Element) => string) {
+  return blocks.map((block) => markdown(block, citation)).join("\n\n").trim().slice(0, 65000);
+}
+
+function assistantTimestamp(message: HTMLElement, key: number) {
+  const copy = message.querySelector<HTMLElement>(".llm-message-action-copy[data-conversation-key]");
+  if (copy && Number(copy.dataset.conversationKey) !== key) return;
+  const timestamp = Number(copy?.dataset.assistantTimestamp || message.dataset.messageTimestamp);
+  if (Number.isSafeInteger(timestamp) && timestamp > 0) return timestamp;
+}
+
+export function answerForTurn(container: Element, itemID: number, turnID: string) {
+  const current = conversationAt(container, itemID);
+  if (!current || !turnID.startsWith(`${current.key}:`)) return [];
+  const messages = [...current.chat.querySelectorAll('#llm-chat-box > [data-message-role="assistant"]')] as HTMLElement[];
+  const message = messages
+    .find((node) => `${current.key}:${assistantTimestamp(node, current.key)}` === turnID &&
+      !node.querySelector(".llm-bubble.streaming, .llm-typing"));
+  return message ? answerBlocks(message) : [];
 }
 
 function pdfSources(answer: Element) {
@@ -108,9 +134,14 @@ export function observeConversation(
     }
     const { chat, key } = current;
     const turns: ReadTurn[] = [];
-    const messages = Array.from(chat.querySelector("#llm-chat-box")?.children ?? []) as HTMLElement[];
+    const box = chat.querySelector("#llm-chat-box");
+    const messages = Array.from(box?.children ?? []) as HTMLElement[];
     const firstMessage = messages.find((message) => message.dataset.messageIndex !== undefined);
-    const partial = Boolean(firstMessage && Number(firstMessage.dataset.messageIndex) > 0);
+    const renderedUsers = messages.filter((message) => message.dataset.messageRole === "user").length;
+    const expectedUsers = chat.querySelectorAll(".llm-turn-navigator-marker").length;
+    const partial = !box || Number(firstMessage?.dataset.messageIndex) > 0 ||
+      expectedUsers > renderedUsers ||
+      !!box.querySelector('[data-message-role="user"] #llm-input, .llm-bubble.streaming, .llm-typing');
     let user: Element | undefined;
     let userIndex = -1;
     for (const message of messages) {
@@ -123,17 +154,15 @@ export function observeConversation(
           message.classList.contains("llm-compact-marker-wrapper") ||
           Number(message.dataset.messageIndex) !== userIndex + 1 ||
           message.querySelector(".llm-bubble.streaming, .llm-typing")) continue;
-      const copy = message.querySelector<HTMLElement>(".llm-message-action-copy[data-conversation-key]");
-      if (copy && Number(copy.dataset.conversationKey) !== key) continue;
-      const timestamp = Number(copy?.dataset.assistantTimestamp || message.dataset.messageTimestamp);
-      if (!Number.isSafeInteger(timestamp) || timestamp < 1) continue;
-      const blocks = [...message.querySelectorAll<HTMLElement>(".llm-assistant-answer, .llm-agent-inline-text")] as HTMLElement[];
-      const answer = blocks.map(markdown).join("\n\n").trim().slice(0, 65000);
+      const timestamp = assistantTimestamp(message, key);
+      if (!timestamp) continue;
+      const blocks = answerBlocks(message);
+      const answer = answerMarkdown(blocks);
       if (!answer) continue;
       const stopped = /^\[(?:Cancelled|Canceled|Aborted|已取消)\]$/i.test(answer);
       const { question, branchID } = readNativePrompt(user.textContent || "");
       turns.push({
-        timestamp, stopped, branchID,
+        timestamp, messageIndex: userIndex, stopped, branchID,
         question: question.slice(0, 20000),
         answer: stopped ? "" : answer,
         sources: blocks.flatMap(pdfSources).slice(0, 30),
@@ -147,9 +176,10 @@ export function observeConversation(
   }
 
   const observer = new win.MutationObserver((mutations) => {
-    if (timer !== undefined || !mutations.some(({ target, addedNodes, removedNodes }) => {
+    if (timer !== undefined || !mutations.some(({ type, target, addedNodes, removedNodes }) => {
       const element = target.nodeType === 1 ? target as Element : target.parentElement;
       return element?.matches("#llm-main") || !!element?.closest("#llm-chat-box") ||
+        (type === "childList" && !!element?.closest(".llm-turn-navigator-list")) ||
         [...addedNodes, ...removedNodes].some((node) => node?.nodeType === 1 &&
           ((node as Element).matches("#llm-main") || (node as Element).querySelector("#llm-main")));
     })) return;
@@ -157,7 +187,10 @@ export function observeConversation(
   });
   observer.observe(doc.documentElement, {
     childList: true, subtree: true, characterData: true, attributes: true,
-    attributeFilter: ["data-item-id", "data-base-paper-item-id", "data-conversation-kind", "class"],
+    attributeFilter: [
+      "data-item-id", "data-base-paper-item-id", "data-conversation-kind",
+      "data-message-index", "data-message-timestamp", "data-assistant-timestamp", "class",
+    ],
   });
   sync();
   return () => {
@@ -168,6 +201,7 @@ export function observeConversation(
 
 type ReadTurn = {
   timestamp: number;
+  messageIndex: number;
   branchID?: string;
   question: string;
   answer: string;

@@ -11,12 +11,18 @@ const panelView = ".llm-standalone-side-panel-view";
 const nativeTab = ".llm-standalone-side-panel-tab";
 const plus = ".llm-standalone-side-panel-icon-new-tab";
 const paperChat = "#llm-main[data-conversation-kind='paper']";
-const chatBody = `.llm-standalone-content ${paperChat}`;
+const chatBody = ".llm-standalone-content #llm-main";
 const readerChat = `#zotero-context-pane-item-deck ${paperChat}, item-details[tabType="reader"] ${paperChat}`;
 const sidebarToggle = ".llm-standalone-side-panel-toggle";
 const legacyTransferButton = ".llm-message-actions .llm-message-action-canvas";
 const branchContext = ".zcanvas-branch-context";
 const html = "http://www.w3.org/1999/xhtml";
+const workspaceHostSelector = ".llm-standalone-content-wrapper";
+const activeWorkspace = `${workspaceHostSelector}[data-zcanvas-workspace]`;
+const minSplitChatWidth = 500;
+const minSideCanvasWidth = 320;
+const defaultSideCanvasWidth = 420;
+const sidePanelDividerWidth = 5;
 
 function element(doc: Document, name: "button", text: string): HTMLButtonElement;
 function element(doc: Document, name: "div" | "span" | "style", text?: string): HTMLElement;
@@ -27,7 +33,8 @@ function element(doc: Document, name: string, text = "") {
 }
 
 function paperIDFor(chat: HTMLElement | null) {
-  const id = Number(chat?.dataset.basePaperItemId || chat?.dataset.itemId || 0);
+  if (!chat?.matches(paperChat)) return 0;
+  const id = Number(chat.dataset.basePaperItemId || chat.dataset.itemId || 0);
   return id > 0 ? parentPaper(Zotero.Items.get(id))?.id ?? 0 : 0;
 }
 
@@ -65,11 +72,10 @@ function attachReader(win: HostWindow, receiver: Receiver) {
   const css = element(doc, "style", `
     #llm-main .llm-header-actions > .zcanvas-reader-button {
       flex: none; width: auto; min-width: 0; color: var(--fill-primary); opacity: 1; height: 24px; padding-inline: 6px;
-      background: var(--fill-quinary); border-radius: 6px; white-space: nowrap;
+      border-radius: 6px; white-space: nowrap;
       font: inherit; font-weight: 600; font-size: var(--llm-fs-11, 11px);
     }
-    #llm-main .llm-header-actions > .zcanvas-reader-button:hover,
-    #llm-main .llm-header-actions > .zcanvas-reader-button[aria-pressed="true"] { background: var(--fill-quaternary); }
+    #llm-main .llm-header-actions > .zcanvas-reader-button:is(:hover, [aria-pressed="true"]) { background: var(--fill-quinary); }
     #llm-main[data-zcanvas-reader-active] > :not(.llm-header, .zcanvas-reader-content, [data-zcanvas-composer], [data-zcanvas-menu]) { display: none !important; }
     .zcanvas-reader-content { position: relative; flex: 1; min-height: 0; min-width: 0; }
     .zcanvas-reader-content > iframe { position: absolute; inset: 0; }
@@ -153,7 +159,29 @@ function attach(win: HostWindow, receiver: Receiver) {
   const doc = win.document;
   const zh = Zotero.locale.startsWith("zh");
   const canvasLabel = zh ? "画布" : "Canvas";
+  const resizeTo = win.resizeTo;
+  const resizeDescriptor = Object.getOwnPropertyDescriptor(win, "resizeTo");
+  const resizeWindow: Window["resizeTo"] = (width, height) => {
+    if (win.fullScreen || win.windowState === win.STATE_FULLSCREEN) return;
+    resizeTo.call(win, width, height);
+  };
+  if (Zotero.isMac) win.resizeTo = resizeWindow;
   const css = element(doc, "style", `
+    ${activeWorkspace} { position: relative; }
+    ${activeWorkspace} > :is(.llm-standalone-content-title, .llm-follower-kind-row),
+    ${activeWorkspace} > .llm-standalone-tab-row > :is(.llm-standalone-tab-group, .llm-standalone-tab-row-trailing),
+    ${activeWorkspace} ~ :is(${rightPanel}, .llm-standalone-side-panel-resizer) { display: none !important; }
+    ${activeWorkspace} > .llm-standalone-content { visibility: hidden; }
+    ${activeWorkspace} :is([data-zcanvas-composer], [data-zcanvas-menu]) { visibility: visible; }
+    .zcanvas-workspace {
+      position: absolute; inset: var(--llm-standalone-toolbar-row-height, 36px) 0 0; z-index: 1;
+      background: var(--material-sidepane); color: var(--fill-primary);
+    }
+    .llm-standalone-title-action.zcanvas-back {
+      min-height: 0; height: 26px; width: auto; padding-inline: 8px; font: inherit;
+      white-space: nowrap; font-size: var(--llm-standalone-ui-font-size, 12px); -moz-window-dragging: no-drag;
+    }
+    .zcanvas-nav[aria-pressed="true"] { background: var(--fill-quinary); color: var(--fill-primary); }
     ${rightPanel}[data-zcanvas-active] ${panelView} > :not(.zcanvas-content) { display: none !important; }
     ${rightPanel}[data-zcanvas-active] ${panelView} { padding-top: 0; }
     ${rightPanel}[data-zcanvas-active] ${nativeTab}.active:not(.zcanvas-tab) { background: transparent; color: var(--fill-secondary); }
@@ -169,7 +197,7 @@ function attach(win: HostWindow, receiver: Receiver) {
     :is(.zcanvas-tab, [data-side-tab-kind="canvas"]) > .llm-standalone-side-panel-tab-close {
       margin-inline-start: 5px;
     }
-    .zcanvas-nav[aria-pressed="true"], .zcanvas-top[aria-pressed="true"] {
+    .zcanvas-top[aria-pressed="true"] {
       background: var(--fill-quinary); color: var(--fill-primary);
     }
     .zcanvas-icon {
@@ -183,15 +211,15 @@ function attach(win: HostWindow, receiver: Receiver) {
       -moz-window-dragging: no-drag;
       font-size: var(--llm-standalone-ui-font-size, 12px); font-weight: 600;
     }
-    .llm-standalone-title-action.zcanvas-top::before { content: none !important; }
-    .zcanvas-top[hidden] { display: none !important; }
+    .llm-standalone-title-action:is(.zcanvas-top, .zcanvas-back)::before { content: none !important; }
   `);
   (doc.head ?? doc.documentElement).append(css);
   const navButton = element(doc, "button", "");
   navButton.type = "button";
   navButton.className = "llm-standalone-nav-row zcanvas-nav";
-  navButton.title = canvasLabel;
-  navButton.setAttribute("aria-controls", "llm-standalone-side-panel");
+  navButton.title = zh ? "切换到画布视图" : "Switch to canvas view";
+  navButton.setAttribute("aria-controls", "zcanvas-workspace");
+  navButton.setAttribute("aria-pressed", "false");
   const navIcon = element(doc, "span");
   navIcon.className = "zcanvas-icon";
   navIcon.setAttribute("aria-hidden", "true");
@@ -203,7 +231,14 @@ function attach(win: HostWindow, receiver: Receiver) {
   topButton.prepend(topIcon);
   topButton.type = "button";
   topButton.className = "llm-standalone-title-action zcanvas-top";
-  topButton.setAttribute("aria-controls", "llm-standalone-side-panel");
+  topButton.title = zh ? "在当前窗口打开画布" : "Open canvas in this window";
+  topButton.setAttribute("aria-controls", "llm-standalone-side-panel zcanvas-workspace");
+  const workspace = element(doc, "div");
+  workspace.id = "zcanvas-workspace";
+  workspace.className = "zcanvas-workspace";
+  const back = element(doc, "button", zh ? "← 返回对话" : "← Back to chat");
+  back.type = "button";
+  back.className = "llm-standalone-title-action zcanvas-back";
   const tab = element(doc, "div");
   tab.className = "llm-standalone-side-panel-tab zcanvas-tab";
   const select = element(doc, "button", canvasLabel);
@@ -228,6 +263,9 @@ function attach(win: HostWindow, receiver: Receiver) {
   let currentPaperID = 0;
   let canvasPaperID = 0;
   let unmount: (() => void) | undefined;
+  let workspaceHost: HTMLElement | undefined;
+  let workspaceCanvas: { itemID: number; unmount: () => void } | undefined;
+  let workspaceTrigger: HTMLButtonElement | undefined;
   let nativeSelection = "";
   let frame = 0;
 
@@ -235,8 +273,22 @@ function attach(win: HostWindow, receiver: Receiver) {
     return paperIDFor(doc.querySelector<HTMLElement>(chatBody));
   }
 
-  function markEntry(active: boolean) {
-    navButton.setAttribute("aria-pressed", String(active));
+  function canSplitCanvas() {
+    const host = doc.querySelector<HTMLElement>(workspaceHostSelector);
+    const sidePanel = host?.parentElement?.querySelector<HTMLElement>(rightPanel);
+    if (!host || !sidePanel) return false;
+    const chatWidth = host.getBoundingClientRect().width;
+    if (!sidePanel.hidden) {
+      return chatWidth >= minSplitChatWidth && sidePanel.getBoundingClientRect().width >= minSideCanvasWidth;
+    }
+    const panelWidth = Number.parseFloat(
+      win.getComputedStyle(sidePanel)?.getPropertyValue("--llm-standalone-side-panel-width") ?? "",
+    );
+    const canvasWidth = Math.max(minSideCanvasWidth, panelWidth || defaultSideCanvasWidth);
+    return chatWidth >= minSplitChatWidth + canvasWidth + sidePanelDividerWidth;
+  }
+
+  function markSideEntry(active: boolean) {
     topButton.setAttribute("aria-pressed", String(active));
   }
 
@@ -245,7 +297,7 @@ function attach(win: HostWindow, receiver: Receiver) {
     tab.classList.toggle("active", active);
     select.setAttribute("aria-pressed", String(active));
     content.hidden = !active;
-    markEntry(active);
+    markSideEntry(active);
   }
 
   function closeCanvas() {
@@ -257,12 +309,52 @@ function attach(win: HostWindow, receiver: Receiver) {
     tab.remove();
   }
 
+  function closeWorkspace() {
+    if (!workspaceHost) return;
+    workspaceCanvas?.unmount();
+    workspaceCanvas = undefined;
+    workspace.remove();
+    back.remove();
+    workspaceHost.removeAttribute("data-zcanvas-workspace");
+    workspaceHost = undefined;
+    workspaceTrigger = undefined;
+    navButton.setAttribute("aria-pressed", "false");
+  }
+
+  function mountWorkspace(itemID: number) {
+    workspaceCanvas?.unmount();
+    workspaceCanvas = undefined;
+    try {
+      workspaceCanvas = { itemID, unmount: receiver.mountPaper(itemID, workspace, closeWorkspace) };
+    } catch (error) {
+      closeWorkspace();
+      win.alert(errorMessage(error));
+    }
+  }
+
+  function openWorkspace(itemID: number, trigger: HTMLButtonElement) {
+    const host = doc.querySelector<HTMLElement>(workspaceHostSelector);
+    const leading = host?.querySelector(".llm-standalone-tab-row-leading");
+    if (!itemID || !host || !leading || workspaceHost) return;
+    closeCanvas();
+    workspaceHost = host;
+    workspaceTrigger = trigger;
+    host.append(workspace);
+    host.setAttribute("data-zcanvas-workspace", "");
+    leading.append(back);
+    navButton.setAttribute("aria-pressed", "true");
+    mountWorkspace(itemID);
+    if (workspaceHost) back.focus({ preventScroll: true });
+  }
+
   function selectedNativeTab() {
     const active = panel?.querySelector<HTMLElement>(`${nativeTab}[aria-selected="true"]`);
     return `${active?.dataset.sideTabId || active?.dataset.sideTabKind || ""}:${panel?.dataset.sideView || ""}`;
   }
 
   function open(itemID: number) {
+    if (workspaceCanvas?.itemID === itemID) return true;
+    closeWorkspace();
     const nextPanel = doc.querySelector<HTMLElement>(rightPanel);
     const strip = nextPanel?.querySelector(".llm-standalone-side-panel-tabs");
     const view = nextPanel?.querySelector(panelView);
@@ -294,21 +386,24 @@ function attach(win: HostWindow, receiver: Receiver) {
     removeLegacyTransferButtons(doc);
     compactBranchBubbles(doc);
     const nextPanel = doc.querySelector<HTMLElement>(rightPanel);
-    const nextPaperID = paperID();
+    const chat = doc.querySelector<HTMLElement>(chatBody);
+    const nextPaperID = paperIDFor(chat);
     const navigation = doc.querySelector(".llm-standalone-primary-nav");
     const toggle = doc.querySelector(sidebarToggle);
-    if (nextPaperID && nextPanel && navigation && toggle) {
-      if (navButton.parentElement !== navigation) navigation.append(navButton);
-      if (topButton.nextElementSibling !== toggle) toggle.before(topButton);
-      topButton.hidden = navigation.closest(".llm-standalone-sidebar")?.getAttribute("data-sidebar-state") !== "collapsed";
-    } else {
-      navButton.remove();
-      topButton.remove();
+    if (workspaceHost) {
+      if (!workspace.isConnected || (chat?.dataset.conversationKind && !chat.matches(paperChat))) closeWorkspace();
+      else if (nextPaperID && nextPaperID !== workspaceCanvas?.itemID) mountWorkspace(nextPaperID);
     }
+    if (nextPaperID && navigation) {
+      if (navButton.parentElement !== navigation) navigation.append(navButton);
+    } else navButton.remove();
+    if (nextPaperID && nextPanel && toggle) {
+      if (topButton.nextElementSibling !== toggle) toggle.before(topButton);
+    } else topButton.remove();
     if (companionGlobals().LLMForZotero?.api?.canvas?.openPaper) {
       if (unmount) closeCanvas();
       panel = nextPanel;
-      markEntry(!!panel && !panel.hidden && panel.dataset.sideView === "canvas");
+      markSideEntry(!!panel && !panel.hidden && panel.dataset.sideView === "canvas");
       return;
     }
     if (!nextPanel || nextPanel !== panel || nextPaperID !== currentPaperID || panel?.hidden ||
@@ -343,8 +438,23 @@ function attach(win: HostWindow, receiver: Receiver) {
     if (event.target === tab) select.click();
   });
   launch.addEventListener("click", () => activate(paperID()));
-  navButton.addEventListener("click", () => activate(paperID()));
-  topButton.addEventListener("click", () => activate(paperID()));
+  navButton.addEventListener("click", () => openWorkspace(paperID(), navButton));
+  topButton.addEventListener("click", () => {
+    const itemID = paperID();
+    if (canSplitCanvas()) void activate(itemID);
+    else openWorkspace(itemID, topButton);
+  });
+  back.addEventListener("click", () => {
+    const trigger = workspaceTrigger;
+    closeWorkspace();
+    if (trigger === topButton && topButton.isConnected) {
+      topButton.focus({ preventScroll: true });
+      return;
+    }
+    const collapsed = navButton.closest('.llm-standalone-sidebar[data-sidebar-state="collapsed"]');
+    const target = collapsed ? doc.querySelector<HTMLButtonElement>(".llm-standalone-nav-toggle") : navButton;
+    (target ?? topButton).focus({ preventScroll: true });
+  });
 
   function resumeNative(event: Event) {
     const target = event.target as Element | null;
@@ -359,15 +469,20 @@ function attach(win: HostWindow, receiver: Receiver) {
   const observer = new win.MutationObserver(() => { if (!frame) frame = win.requestAnimationFrame(sync); });
   observer.observe(doc.documentElement, {
     childList: true, subtree: true, attributes: true,
-    attributeFilter: ["aria-selected", "data-side-view", "data-sidebar-state", "data-base-paper-item-id", "data-item-id", "data-conversation-kind", "hidden"],
+    attributeFilter: ["aria-selected", "data-side-view", "data-base-paper-item-id", "data-item-id", "data-conversation-kind", "hidden"],
   });
   sync();
 
   function dispose() {
     observer.disconnect();
     win.cancelAnimationFrame(frame);
+    if (!win.closed && win.resizeTo === resizeWindow) {
+      if (resizeDescriptor) Object.defineProperty(win, "resizeTo", resizeDescriptor);
+      else Reflect.deleteProperty(win, "resizeTo");
+    }
     doc.removeEventListener("click", resumeNative, true);
     doc.removeEventListener("keydown", resumeByKey, true);
+    closeWorkspace();
     closeCanvas();
     launch.remove();
     navButton.remove();

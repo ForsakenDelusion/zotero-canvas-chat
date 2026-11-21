@@ -170,23 +170,29 @@ export class CanvasSession {
       const nativeBranches = new Map(this.document.cards.filter((card) => card.nativeBranch).map((card) => [card.id, card]));
       for (const turn of turns) {
         const branch = turn.branchID && nativeBranches.get(turn.branchID);
-        if (!branch || branch.prompt !== turn.prompt) continue;
+        if (!branch) continue;
         const status = turn.stopped ? "stopped" : "done";
         const nativeBranch = Number(turn.id.split(":", 1)[0]) || branch.nativeBranch;
         if (branch.answer === turn.answer && branch.status === status && branch.nativeBranch === nativeBranch &&
+            branch.prompt === turn.prompt &&
             JSON.stringify(branch.sources ?? []) === JSON.stringify(turn.sources)) continue;
-        this.finishNativeBranch(branch.id, { answer: turn.answer, sources: turn.sources, status, nativeBranch });
+        this.finishNativeBranch(branch.id, {
+          title: turn.prompt.slice(0, 80), prompt: turn.prompt, answer: turn.answer,
+          sources: turn.sources, status, nativeBranch,
+        });
       }
       if (partial) return;
       const existing = this.document.cards;
       const byTurn = new Map(existing.filter((card) => card.importedTurn).map((card) => [card.importedTurn, card]));
+      const responses = turns.filter((turn) => !turn.branchID || !nativeBranches.has(turn.branchID));
+      const firstNewResponse = responses[responses.findLastIndex((turn) => byTurn.has(turn.id)) + 1];
       const synced: Card[] = [];
       const added: Card[] = [];
-      for (const turn of turns) {
-        if (turn.branchID && nativeBranches.get(turn.branchID)?.prompt === turn.prompt) continue;
-        const current = byTurn.get(turn.id);
-        if (!current && existing.length + added.length >= 1000) continue;
+      for (const turn of responses) {
         const previous = synced.at(-1);
+        const current = byTurn.get(turn.id) ??
+          (turn === firstNewResponse ? replacedResponse(byTurn.values(), turn, previous) : undefined);
+        if (!current && existing.length + added.length >= 1000) continue;
         const position = current ?? (previous
           ? { x: previous.x, y: previous.y + 420 }
           : nextPosition(existing, []));
@@ -197,10 +203,10 @@ export class CanvasSession {
         }
         const updated: Card = {
           id: current?.id ?? `llm:${turn.id}`,
-          x, y, kind: "response", importedTurn: turn.id,
+          x, y, kind: "response", importedTurn: turn.id, messageIndex: turn.messageIndex,
           parents: previous ? [previous.id] : [],
           title: turn.prompt.slice(0, 80), prompt: turn.prompt, answer: turn.answer,
-          sources: turn.sources.length ? turn.sources : current?.sources ?? [],
+          sources: turn.sources.length || current?.importedTurn !== turn.id ? turn.sources : current.sources ?? [],
           status: turn.stopped ? "stopped" : "done",
         };
         if (!current) added.push(updated);
@@ -473,6 +479,21 @@ export class CanvasSession {
     clearTimeout(this.queuedSave);
     if (!this.saved) await this.serial(() => this.save());
   }
+}
+
+function replacedResponse(cards: Iterable<Card>, turn: ConversationTurn, previous?: Card) {
+  if (turn.messageIndex === undefined) return;
+  const [key, timestamp] = turn.id.split(":");
+  const previousTimestamp = Number(previous?.importedTurn?.split(":")[1] ?? 0);
+  const candidates = [...cards].filter((card) => {
+    const [oldKey, oldTimestamp] = card.importedTurn!.split(":");
+    return oldKey === key && Number(oldTimestamp) > previousTimestamp && Number(oldTimestamp) < Number(timestamp) &&
+      (previous ? card.parents.length === 1 && card.parents[0] === previous.id : card.parents.length === 0);
+  });
+  const indexed = candidates.filter((card) => card.messageIndex === turn.messageIndex);
+  const legacy = candidates.filter((card) => card.messageIndex === undefined);
+  if (indexed.length === 1) return indexed[0];
+  if (!indexed.length && legacy.length === 1) return legacy[0];
 }
 
 export const initialSettings = () => ({ ...defaultSettings, hasKey: false });

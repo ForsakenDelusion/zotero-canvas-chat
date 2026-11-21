@@ -392,7 +392,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
       </main>
     </div>
     {preview ? <cardActions.Provider value={actions}>
-      <CardPreview key={preview.id} card={preview} close={close}>{questionForm}</CardPreview>
+      <CardPreview key={preview.id} card={preview} bridge={bridge} close={close}>{questionForm}</CardPreview>
     </cardActions.Provider> : questionForm}
     {modal === "settings" && <SettingsDialog value={snapshot.settings} companionAvailable={snapshot.companionAvailable} close={close}
       save={(settings, key) => bridge.call({ type: "settings", settings, key })} />}
