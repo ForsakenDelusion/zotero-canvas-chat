@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ancestors, conversationCards, emptyDocument } from "../shared/graph.ts";
 import { readNativePrompt } from "../shared/question.ts";
-import { documentSchema, type CanvasDocument, type Reference } from "../shared/schema.ts";
+import { documentSchema, settingsSchema, type CanvasDocument, type Reference, type Settings } from "../shared/schema.ts";
 import { CanvasSession, initialSettings } from "../src/session.ts";
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
@@ -109,6 +109,55 @@ test("conversation backfill preserves existing cards and updates them across lay
     await assertRewrite(75);
     await session.command({ type: "undo" });
     await assertRewrite(42);
+  } finally {
+    await session.close();
+  }
+});
+
+test("settings updates validate endpoints, reset keys on provider change, and reject removed providers", async () => {
+  const paper: Reference = {
+    uri: "zotero://select/library/items/ABCDEFGH",
+    title: "Fixture", authors: "", year: "", abstract: "",
+  };
+  let stored: Settings & { hasKey: boolean } = { ...initialSettings(), hasKey: true };
+  let lastKey: string | undefined;
+  const session = new CanvasSession({
+    paper,
+    load: async () => null,
+    save: async () => {},
+    getSettings: () => stored,
+    setSettings(settings, key) {
+      lastKey = key;
+      stored = { ...settings, hasKey: key === undefined ? stored.hasKey : Boolean(key) };
+    },
+    generate: async function* () {},
+    controller: () => new AbortController(),
+    image: async () => null,
+    open: () => {},
+    search: async () => [],
+    reference: async () => paper,
+    note: async () => "",
+  });
+  try {
+    assert.equal(settingsSchema.safeParse({ provider: "llm-for-zotero", endpoint: "", model: "" }).success, false);
+    await session.command({
+      type: "settings",
+      settings: { provider: "compatible", endpoint: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+    });
+    assert.equal(lastKey, undefined);
+    assert.equal((await session.ready()).settings.hasKey, true);
+
+    await session.command({
+      type: "settings",
+      settings: { provider: "anthropic", endpoint: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514" },
+    });
+    assert.equal(lastKey, "");
+    assert.equal((await session.ready()).settings.hasKey, false);
+
+    await assert.rejects(() => session.command({
+      type: "settings",
+      settings: { provider: "compatible", endpoint: "http://example.com/v1", model: "bad" },
+    }), /HTTPS/);
   } finally {
     await session.close();
   }

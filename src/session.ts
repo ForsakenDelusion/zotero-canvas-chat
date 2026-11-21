@@ -2,7 +2,7 @@ import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPositio
 import { nativeBranchPrompt } from "../shared/question";
 import {
   defaultSettings, documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
-  type Command, type ConversationTurn, type Event, type Excerpt, type ImportedTurn, type Reference, type Settings, type Snapshot,
+  type Command, type ConversationTurn, type Event, type Excerpt, type Reference, type Settings, type Snapshot,
 } from "../shared/schema";
 import { modelEndpoint } from "./model";
 
@@ -11,7 +11,6 @@ export interface CanvasHost {
   load(): Promise<CanvasDocument | null>;
   save(document: CanvasDocument): Promise<void>;
   getSettings(): Settings & { hasKey: boolean };
-  companionAvailable?(): boolean;
   setSettings(settings: Settings, key?: string): void;
   generate(system: string, messages: Message[], signal: AbortSignal): AsyncIterable<string>;
   controller(): AbortController;
@@ -59,7 +58,6 @@ export class CanvasSession {
       undo: this.previous.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
       redo: this.next.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
       settings: this.host.getSettings(),
-      companionAvailable: this.host.companionAvailable?.(),
       saved: this.saved,
       saveError: this.saveError,
     };
@@ -144,23 +142,6 @@ export class CanvasSession {
       this.emit({ type: "focus", id: card.id });
       if (child) this.start(child);
       await this.save();
-    });
-  }
-
-  importTurn(turn: ImportedTurn) {
-    return this.serial(async () => {
-      if (this.disposed) throw new Error("画布已关闭。");
-      let card = this.document.cards.find((entry) => entry.importedTurn === turn.id);
-      if (!card) {
-        card = this.newCard({
-          kind: "response", importedTurn: turn.id, title: turn.prompt.slice(0, 80),
-          prompt: turn.prompt, answer: turn.answer, sources: turn.sources, status: "done",
-        }, []);
-        this.update([...this.document.cards, card]);
-      }
-      this.emit({ type: "focus", id: card.id });
-      if (!this.saved) await this.save();
-      if (this.saveError) throw new Error(this.saveError);
     });
   }
 
@@ -446,12 +427,6 @@ export class CanvasSession {
           break;
         }
         case "settings": {
-          if (command.settings.provider === "llm-for-zotero") {
-            if (!this.host.companionAvailable?.()) throw new Error("请安装支持画布的 LLM for Zotero 联动版。");
-            this.host.setSettings(command.settings);
-            this.emit();
-            return;
-          }
           const endpoint = modelEndpoint(command.settings);
           const current = this.host.getSettings();
           let changed = current.provider !== command.settings.provider;

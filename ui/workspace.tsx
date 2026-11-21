@@ -394,7 +394,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     {preview ? <cardActions.Provider value={actions}>
       <CardPreview key={preview.id} card={preview} bridge={bridge} close={close}>{questionForm}</CardPreview>
     </cardActions.Provider> : questionForm}
-    {modal === "settings" && <SettingsDialog value={snapshot.settings} companionAvailable={snapshot.companionAvailable} close={close}
+    {modal === "settings" && <SettingsDialog value={snapshot.settings} close={close}
       save={(settings, key) => bridge.call({ type: "settings", settings, key })} />}
     {modal === "library" && <LibraryDialog call={bridge.call} close={close} />}
     {modal === "remove" && <Dialog title="移除选中的卡片" close={close}>

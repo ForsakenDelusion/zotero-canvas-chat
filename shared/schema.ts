@@ -52,7 +52,7 @@ export const documentSchema = z.object({
 });
 
 export const settingsSchema = z.object({
-  provider: z.enum(["compatible", "anthropic", "ollama", "llm-for-zotero"]),
+  provider: z.enum(["compatible", "anthropic", "ollama"]),
   endpoint: z.string().trim().max(2048),
   model: z.string().trim().max(200),
 });
@@ -98,8 +98,15 @@ export type Settings = z.infer<typeof settingsSchema>;
 export type Command = z.infer<typeof commandSchema>;
 export type Position = z.infer<typeof position>;
 export type Excerpt = { quote?: string; anchor: Anchor };
-export type ImportedTurn = { id: string; prompt: string; answer: string; sources: Anchor[] };
-export type ConversationTurn = ImportedTurn & { messageIndex?: number; stopped?: boolean; branchID?: string };
+export type ConversationTurn = {
+  id: string;
+  prompt: string;
+  answer: string;
+  sources: Anchor[];
+  messageIndex?: number;
+  stopped?: boolean;
+  branchID?: string;
+};
 export type CitedAnswer = { answer: string; prefix: string; count: number };
 export type Snapshot = {
   document: CanvasDocument;
@@ -108,7 +115,6 @@ export type Snapshot = {
   undo: boolean;
   redo: boolean;
   settings: Settings & { hasKey: boolean };
-  companionAvailable?: boolean;
   saved: boolean;
   saveError?: string;
 };

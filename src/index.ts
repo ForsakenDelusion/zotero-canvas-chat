@@ -1,7 +1,6 @@
 import { conversationCards } from "../shared/graph";
 import { errorMessage, requestSchema, type Excerpt, type Snapshot } from "../shared/schema";
 import { hostColors, type CanvasTheme } from "../shared/theme";
-import { companionGlobals, turnSchema } from "./companion";
 import { makeAnchor, parentPaper, zoteroHost } from "./library";
 import { askConversation, conversationAt, observeConversation } from "./llm-turn";
 import { watchLLMWindows } from "./llm-window";
@@ -186,16 +185,6 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   return unmount;
 }
 
-async function acceptTurn(input: unknown) {
-  const turn = turnSchema.parse(input);
-  const paper = parentPaper(Zotero.Items.get(turn.itemID));
-  if (!paper) throw new Error("找不到这条回答对应的文献。");
-  await sessionFor(paper).importTurn({
-    id: `${turn.conversationKey}:${turn.timestamp}`, prompt: turn.question || "导入的回答",
-    answer: turn.answer, sources: sourceAnchors(paper, turn.sources),
-  });
-}
-
 function sourceAnchors(paper: Zotero.Item, entries: { attachmentID: number; pageIndex: number }[]) {
   const sources = new Map<string, ReturnType<typeof makeAnchor>>();
   for (const source of entries) {
@@ -207,24 +196,23 @@ function sourceAnchors(paper: Zotero.Item, entries: { attachmentID: number; page
   return [...sources.values()];
 }
 
+function llmForZoteroInstalled() {
+  return Boolean((Zotero as typeof Zotero & { LLMForZotero?: unknown }).LLMForZotero);
+}
+
 function openFromReader(paper: Zotero.Item, excerpt?: Excerpt) {
   void (async () => {
-    const api = companionGlobals().LLMForZotero?.api?.canvas;
-    if (api?.openPaper) await api.openPaper(paper.id);
-    else await injectedUI?.openPaper(paper.id);
+    await injectedUI?.openPaper(paper.id);
     if (excerpt) await sessionFor(paper).addExcerpt(excerpt, true);
   })().catch((error) => Zotero.getMainWindow()?.alert(errorMessage(error)));
 }
 
 export function startup(id: string) {
-  const receiver = { version: 2 as const, acceptTurn, mountPaper };
-  companionGlobals().ZoteroCanvasChat = receiver;
-  injectedUI = watchLLMWindows(receiver);
-  unregisterReader = readerHooks(id, openFromReader, () => !!companionGlobals().LLMForZotero);
+  injectedUI = watchLLMWindows({ mountPaper });
+  unregisterReader = readerHooks(id, openFromReader, llmForZoteroInstalled);
 }
 
 export async function shutdown() {
-  delete companionGlobals().ZoteroCanvasChat;
   unregisterReader?.();
   injectedUI?.dispose();
   injectedUI = undefined;

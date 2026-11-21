@@ -1,10 +1,14 @@
 import { errorMessage } from "../shared/schema";
 import { readNativePrompt } from "../shared/question";
-import { companionGlobals } from "./companion";
 import { parentPaper } from "./library";
 
-type Receiver = NonNullable<ReturnType<typeof companionGlobals>["ZoteroCanvasChat"]>;
+type Receiver = {
+  mountPaper(itemID: number, container: Element, onDetach: () => void): () => void;
+};
 type HostWindow = Window & typeof globalThis;
+type LLMForZoteroGlobal = typeof Zotero & {
+  LLMForZotero?: { data?: { standaloneWindow?: Window } };
+};
 const chatURL = "chrome://llmforzotero/content/standaloneChat.xhtml";
 const rightPanel = "#llm-standalone-side-panel";
 const panelView = ".llm-standalone-side-panel-view";
@@ -14,7 +18,6 @@ const paperChat = "#llm-main[data-conversation-kind='paper']";
 const chatBody = ".llm-standalone-content #llm-main";
 const readerChat = `#zotero-context-pane-item-deck ${paperChat}, item-details[tabType="reader"] ${paperChat}`;
 const sidebarToggle = ".llm-standalone-side-panel-toggle";
-const legacyTransferButton = ".llm-message-actions .llm-message-action-canvas";
 const branchContext = ".zcanvas-branch-context";
 const html = "http://www.w3.org/1999/xhtml";
 const workspaceHostSelector = ".llm-standalone-content-wrapper";
@@ -36,10 +39,6 @@ function paperIDFor(chat: HTMLElement | null) {
   if (!chat?.matches(paperChat)) return 0;
   const id = Number(chat.dataset.basePaperItemId || chat.dataset.itemId || 0);
   return id > 0 ? parentPaper(Zotero.Items.get(id))?.id ?? 0 : 0;
-}
-
-function removeLegacyTransferButtons(doc: Document) {
-  doc.querySelectorAll(legacyTransferButton).forEach((button) => button.remove());
 }
 
 function compactBranchBubbles(doc: Document) {
@@ -89,7 +88,6 @@ function attachReader(win: HostWindow, receiver: Receiver) {
 
   function sync() {
     frame = 0;
-    removeLegacyTransferButtons(doc);
     compactBranchBubbles(doc);
     for (const [chat, entry] of mounted) {
       if (chat.isConnected && entry.button.isConnected && chat.matches(readerChat) && paperIDFor(chat) === entry.id) continue;
@@ -383,7 +381,6 @@ function attach(win: HostWindow, receiver: Receiver) {
 
   function sync() {
     frame = 0;
-    removeLegacyTransferButtons(doc);
     compactBranchBubbles(doc);
     const nextPanel = doc.querySelector<HTMLElement>(rightPanel);
     const chat = doc.querySelector<HTMLElement>(chatBody);
@@ -400,12 +397,6 @@ function attach(win: HostWindow, receiver: Receiver) {
     if (nextPaperID && nextPanel && toggle) {
       if (topButton.nextElementSibling !== toggle) toggle.before(topButton);
     } else topButton.remove();
-    if (companionGlobals().LLMForZotero?.api?.canvas?.openPaper) {
-      if (unmount) closeCanvas();
-      panel = nextPanel;
-      markSideEntry(!!panel && !panel.hidden && panel.dataset.sideView === "canvas");
-      return;
-    }
     if (!nextPanel || nextPanel !== panel || nextPaperID !== currentPaperID || panel?.hidden ||
         (unmount && (!content.isConnected || !tab.isConnected))) closeCanvas();
     panel = nextPanel;
@@ -421,8 +412,6 @@ function attach(win: HostWindow, receiver: Receiver) {
 
   async function activate(itemID: number) {
     try {
-      const nativeOpen = companionGlobals().LLMForZotero?.api?.canvas?.openPaper;
-      if (itemID && nativeOpen) return await nativeOpen(itemID);
       if (itemID && open(itemID)) return;
       win.alert("当前 LLM for Zotero 窗口无法打开画布右栏。");
     } catch (error) {
@@ -539,7 +528,7 @@ export function watchLLMWindows(receiver: Receiver) {
       const main = Zotero.getMainWindow();
       const shortcut = main?.document.getElementById("llmforzotero-key-standalone");
       if (!main || !shortcut) throw new Error("请先启用 LLM for Zotero。");
-      const upstreamWindow = () => companionGlobals().LLMForZotero?.data?.standaloneWindow as HostWindow | undefined;
+      const upstreamWindow = () => (Zotero as LLMForZoteroGlobal).LLMForZotero?.data?.standaloneWindow as HostWindow | undefined;
       if (!upstreamWindow() || upstreamWindow()?.closed) shortcut.dispatchEvent(new main.Event("command"));
       const deadline = Date.now() + 8000;
       while (!stopped && Date.now() < deadline) {
