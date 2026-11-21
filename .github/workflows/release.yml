@@ -56,9 +56,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/zotero-canvas-chat-${VERSION}.xpi" \
-            "dist/updates.json" \
-            --title "Canvas Chat ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --latest
+          NOTES="$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md)"
+          if [ -n "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
+            gh release create "$GITHUB_REF_NAME" \
+              "dist/zotero-canvas-chat-${VERSION}.xpi" \
+              "dist/updates.json" \
+              --title "Canvas Chat ${GITHUB_REF_NAME}" \
+              --notes "$NOTES" \
+              --latest
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "dist/zotero-canvas-chat-${VERSION}.xpi" \
+              "dist/updates.json" \
+              --title "Canvas Chat ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --latest
+          fi
