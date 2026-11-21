@@ -95,26 +95,33 @@ export function conversationAt(container: Element, itemID: number) {
   return { chat, key };
 }
 
-export function askConversation(container: Element, itemID: number, key: number, prompt: string) {
-  const current = conversationAt(container, itemID);
-  if (current?.key !== key) throw new Error("当前论文对话已切换。请重新打开提问框。");
-  const input = current.chat.querySelector<HTMLTextAreaElement>("#llm-input");
-  const send = current.chat.querySelector<HTMLButtonElement>("#llm-send");
-  if (!container.isConnected || !input || !send || input.disabled || input.readOnly ||
-      input.closest('[data-message-role="user"]')) throw new Error("请先结束论文对话中的当前操作。");
-  if (input.value) throw new Error("论文对话中有未发送的草稿，请先处理草稿。");
-  if (current.chat.querySelector(".llm-bubble.streaming, .llm-typing")) {
-    throw new Error("请等当前回答生成完毕。");
+export function readTurnOutcome(
+  chat: HTMLElement, previousMax: number, expectedUserIndex?: number,
+): { state: "pending" } | { state: "done"; answer: string; stopped: boolean } {
+  const box = chat.querySelector("#llm-chat-box");
+  if (!box || chat.querySelector(".llm-bubble.streaming, .llm-typing") ||
+      box.querySelector('[data-message-role="user"] #llm-input')) {
+    return { state: "pending" };
   }
-  const win = input.ownerDocument.defaultView!;
-  input.value = prompt;
-  input.dispatchEvent(new win.Event("input", { bubbles: true }));
-  if (send.disabled || send.hidden) {
-    input.value = "";
-    input.dispatchEvent(new win.Event("input", { bubbles: true }));
-    throw new Error("论文对话现在无法发送，请检查 LLM for Zotero 的输入栏。");
-  }
-  send.click();
+  const messages = Array.from(box.children) as HTMLElement[];
+  const targetUser = expectedUserIndex !== undefined
+    ? messages.find((node) => node.dataset.messageRole === "user" && Number(node.dataset.messageIndex) === expectedUserIndex)
+    : messages.findLast((node) => {
+      const idx = Number(node.dataset.messageIndex);
+      return node.dataset.messageRole === "user" && Number.isSafeInteger(idx) && idx > previousMax;
+    });
+  if (!targetUser) return { state: "pending" };
+  const userIndex = Number(targetUser.dataset.messageIndex);
+  const assistant = messages.find((node) =>
+    node.dataset.messageRole === "assistant" &&
+    !node.classList.contains("llm-compact-marker-wrapper") &&
+    Number(node.dataset.messageIndex) === userIndex + 1 &&
+    !node.querySelector(".llm-bubble.streaming, .llm-typing"));
+  if (!assistant) return { state: "pending" };
+  const answer = answerMarkdown(answerBlocks(assistant));
+  if (!answer) return { state: "pending" };
+  const stopped = /^\[(?:Cancelled|Canceled|Aborted|已取消)\]$/i.test(answer);
+  return { state: "done", answer: stopped ? "" : answer, stopped };
 }
 
 function readModelQuotes(message: HTMLElement) {

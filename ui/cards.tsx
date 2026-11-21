@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { ArrowDown, ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, RefreshCw, Square } from "lucide-react";
+import { ArrowDown, ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -230,13 +230,10 @@ export function CardNode({ data: card }: NodeProps<FlowCard>) {
       <footer className="card-foot">
         {card.status === "streaming" ?
           <button className="nodrag" onClick={() => void call({ type: "stop", id: card.id })}><Square size={13} />停止</button>
-          : <>
-            {!card.importedTurn && !card.nativeBranch && (card.status === "error" || card.status === "stopped") && <button className="nodrag" onClick={() => void call({ type: "retry", id: card.id })}><RefreshCw size={13} />重试</button>}
-            <button className="nodrag" onClick={(event) => {
+          : <button className="nodrag" onClick={(event) => {
               const trigger = event.currentTarget;
               ask(card.id, () => trigger.isConnected ? trigger.getBoundingClientRect() : undefined, undefined, trigger);
-            }}>{continuesMain ? <><ArrowDown size={14} />继续对话</> : <><ArrowDownRight size={14} />追问</>}</button>
-          </>}
+            }}>{continuesMain ? <><ArrowDown size={14} />继续对话</> : <><ArrowDownRight size={14} />追问</>}</button>}
         {card.reference && <button className="nodrag" onClick={() => void call({ type: "source", id: card.id })}><ArrowUpRight size={14} />查看文献</button>}
       </footer>
       {!!card.sources?.length && <footer className="card-foot" style={{ flexWrap: "wrap" }}>

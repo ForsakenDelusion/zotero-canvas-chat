@@ -1,9 +1,7 @@
 import { strFromU8, strToU8, unzlibSync, zlibSync } from "fflate";
-import { defaultSettings, documentSchema, settingsSchema, type Anchor, type CanvasDocument, type Settings } from "../shared/schema";
-import { modelStream } from "./model";
+import { documentSchema, type Anchor, type CanvasDocument } from "../shared/schema";
 import type { CanvasHost } from "./session";
 
-const preference = "extensions.zotero-canvas-chat.";
 const storageTag = "_zcanvas_data";
 const marker = "ZCANVAS1:";
 const encode = (bytes: Uint8Array) => {
@@ -44,16 +42,6 @@ function reference(item: Zotero.Item) {
     year: String(item.getField("date")).match(/\b\d{4}\b/)?.[0] ?? "",
     abstract: String(item.getField("abstractNote")).slice(0, 20000),
   };
-}
-
-function readSettings() {
-  const parsed = settingsSchema.safeParse(Object.fromEntries(Object.keys(defaultSettings)
-    .map((name) => [name, Zotero.Prefs.get(preference + name, true) ?? defaultSettings[name as keyof Settings]])));
-  return parsed.success ? parsed.data : defaultSettings;
-}
-
-function readKey() {
-  return String(Zotero.Prefs.get(preference + "apiKey", true) || "");
 }
 
 function storage(paper: Zotero.Item) {
@@ -144,19 +132,6 @@ export function zoteroHost(paper: Zotero.Item, win: _ZoteroTypes.MainWindow): Ca
   return {
     paper: reference(paper),
     ...storage(paper),
-    getSettings: () => ({ ...readSettings(), hasKey: !!readKey() }),
-    setSettings(settings, key) {
-      for (const [name, value] of Object.entries(settings)) Zotero.Prefs.set(preference + name, value, true);
-      if (key !== undefined) Zotero.Prefs.set(preference + "apiKey", key.trim(), true);
-    },
-    generate(system, messages, signal) {
-      const settings = readSettings();
-      if (!settings.model) {
-        throw new Error("请在画布的「模型设置」中配置模型，再重试。");
-      }
-      return modelStream(settings, readKey(), { system, messages, signal }, win.fetch.bind(win));
-    },
-    controller: () => new win.AbortController(),
     async image(anchor) {
       const attachment = await lookup(anchor.uri);
       if (!attachment || attachment.parentID !== paper.id || !attachment.isPDFAttachment()) return null;

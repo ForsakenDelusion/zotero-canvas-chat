@@ -1,4 +1,4 @@
-import { CanvasSession, initialSettings } from "../src/session";
+import { CanvasSession } from "../src/session";
 import type { Bridge } from "./bridge";
 import type { CanvasDocument, Command, Reference, Result } from "../shared/schema";
 
@@ -44,24 +44,11 @@ const example: CanvasDocument = {
 };
 
 export function demoBridge(): Bridge {
-  let settings = { ...initialSettings(), model: "本地演示" };
   const read = () => localStorage.getItem("zcanvas-demo-v1");
   const session = new CanvasSession({
     paper,
     load: async () => JSON.parse(read() || "null") ?? example,
     save: async (document) => { localStorage.setItem("zcanvas-demo-v1", JSON.stringify(document)); },
-    getSettings: () => settings,
-    setSettings(value, key) { settings = { ...value, hasKey: !!key || settings.hasKey }; },
-    controller: () => new AbortController(),
-    async *generate(_system, messages, signal) {
-      const question = messages.at(-1)?.text.split("\n").filter(Boolean).at(-1) || "阅读问题";
-      const result = `### ${question.slice(0, 75)}\n\n这是演示回答。阅读注意力公式时，可把查询理解为对信息的需求，键理解为用于匹配的索引，值理解为传递的内容。\n\n**检验方法**：固定输入，比较各个注意力头的权重及实际输出。`;
-      for (const chunk of result.match(/.{1,8}|\n/g) || []) {
-        await new Promise((resolve) => setTimeout(resolve, 18));
-        if (signal.aborted) return;
-        yield chunk;
-      }
-    },
     image: async () => null,
     open() { window.dispatchEvent(new Event("zcanvas:demo-source")); },
     search: async (query) => reference.title.toLowerCase().includes(query.toLowerCase()) ? [reference] : [],
@@ -73,6 +60,9 @@ export function demoBridge(): Bridge {
   });
   return {
     async call<C extends Command>(command: C): Promise<Result<C["type"]>> {
+      if (command.type === "crystallize") {
+        return await session.crystallize(command.ids, 0, async (payload) => `### 阅读笔记\n\n${payload.prompt}`) as Result<C["type"]>;
+      }
       return await session.command(command) as Result<C["type"]>;
     },
     subscribe: (listener) => session.subscribe(listener),

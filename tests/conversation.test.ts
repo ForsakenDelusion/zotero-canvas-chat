@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ancestors, conversationCards, emptyDocument } from "../shared/graph.ts";
 import { nativeBranchPrompt, readNativePrompt } from "../shared/question.ts";
-import { documentSchema, settingsSchema, type CanvasDocument, type Reference, type Settings } from "../shared/schema.ts";
-import { CanvasSession, initialSettings, type NativeBranchSubmission } from "../src/session.ts";
+import { documentSchema, type CanvasDocument, type Reference } from "../shared/schema.ts";
+import { CanvasSession, type NativeBranchSubmission } from "../src/session.ts";
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
   const paper: Reference = {
@@ -24,10 +24,6 @@ test("conversation backfill preserves existing cards and updates them across lay
     paper,
     load: async () => existing,
     save: async (document) => { documentSchema.parse(document); },
-    getSettings: initialSettings,
-    setSettings: () => {},
-    generate: async function* () {},
-    controller: () => new AbortController(),
     image: async () => null,
     open: () => {},
     search: async () => [],
@@ -159,10 +155,6 @@ test("manual model quotes in the paper chat attach as branches without breaking 
     paper,
     load: async () => null,
     save: async (document) => { documentSchema.parse(document); },
-    getSettings: initialSettings,
-    setSettings: () => {},
-    generate: async function* () {},
-    controller: () => new AbortController(),
     image: async () => null,
     open: () => {},
     search: async () => [],
@@ -221,10 +213,6 @@ test("archiving native branches records hidden turns across resync, reload, undo
     save: async (document: CanvasDocument) => {
       savedDocument = structuredClone(documentSchema.parse(document));
     },
-    getSettings: initialSettings,
-    setSettings: () => {},
-    generate: async function* () {},
-    controller: () => new AbortController(),
     image: async () => null,
     open: () => {},
     search: async () => [],
@@ -256,8 +244,6 @@ test("archiving native branches records hidden turns across resync, reload, undo
     const branchID = await session.submitNativeBranch(["llm:40:200"], "Test branch", "Right shift distinguishes A->B from B->A.", 40,
       async () => ({ messageIndex: 4 }), () => {});
     await session.syncConversation([turn1, turn2, branchTurn]);
-
-    await assert.rejects(() => session.command({ type: "retry", id: branchID }), /请在论文对话中重试/);
 
     const childBranchID = await session.submitNativeBranch([branchID], "Follow-up on branch", undefined, 40,
       async () => ({ messageIndex: 6 }), () => {});
@@ -335,50 +321,88 @@ test("archiving native branches records hidden turns across resync, reload, undo
   }
 });
 
-test("settings updates validate endpoints, reset keys on provider change, and reject removed providers", async () => {
+test("crystallize delegates note generation to LLM for Zotero, hides utility turn, and preserves collected sources", async () => {
   const paper: Reference = {
     uri: "zotero://select/library/items/ABCDEFGH",
     title: "Fixture", authors: "", year: "", abstract: "",
   };
-  let stored: Settings & { hasKey: boolean } = { ...initialSettings(), hasKey: true };
-  let lastKey: string | undefined;
+  const citedRef: Reference = {
+    uri: "zotero://select/library/items/REF12345",
+    title: "Cited Paper", authors: "Ada Lovelace", year: "1843", abstract: "Foundational notes.",
+  };
+  let savedNote: { text: string; sources: { label: string; uri: string }[] } | undefined;
   const session = new CanvasSession({
     paper,
     load: async () => null,
-    save: async () => {},
-    getSettings: () => stored,
-    setSettings(settings, key) {
-      lastKey = key;
-      stored = { ...settings, hasKey: key === undefined ? stored.hasKey : Boolean(key) };
-    },
-    generate: async function* () {},
-    controller: () => new AbortController(),
+    save: async (document) => { documentSchema.parse(document); },
     image: async () => null,
     open: () => {},
-    search: async () => [],
-    reference: async () => paper,
-    note: async () => "",
+    search: async () => [citedRef],
+    reference: async () => citedRef,
+    note: async (text, sources) => {
+      savedNote = { text, sources };
+      return "zotero://select/library/items/NOTE0001";
+    },
   });
   try {
-    assert.equal(settingsSchema.safeParse({ provider: "llm-for-zotero", endpoint: "", model: "" }).success, false);
-    await session.command({
-      type: "settings",
-      settings: { provider: "compatible", endpoint: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-    });
-    assert.equal(lastKey, undefined);
-    assert.equal((await session.ready()).settings.hasKey, true);
+    const excerptAnchor = { uri: "zotero://open-pdf/library/items/ATTACH01?page=2", page: 2 };
+    const answerAnchor = { uri: "zotero://open-pdf/library/items/ATTACH01?page=5", page: 5 };
+    await session.addExcerpt({ quote: "Edge bitmap uses >> 1.", anchor: excerptAnchor });
+    await session.command({ type: "cite", uri: citedRef.uri });
+    const turn1 = { id: "50:100", messageIndex: 0, prompt: "First", answer: "Main answer.", sources: [answerAnchor] };
+    await session.syncConversation([turn1]);
 
-    await session.command({
-      type: "settings",
-      settings: { provider: "anthropic", endpoint: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514" },
-    });
-    assert.equal(lastKey, "");
-    assert.equal((await session.ready()).settings.hasKey, false);
+    const cards = (await session.ready()).document.cards;
+    assert.equal(cards.filter((card) => card.kind === "excerpt").length, 1);
+    assert.equal(cards.filter((card) => card.kind === "branch").length, 0);
 
-    await assert.rejects(() => session.command({
-      type: "settings",
-      settings: { provider: "compatible", endpoint: "http://example.com/v1", model: "bad" },
-    }), /HTTPS/);
+    const excerptCard = cards.find((card) => card.kind === "excerpt")!;
+    const citeCard = cards.find((card) => card.kind === "citation")!;
+    const responseCard = cards.find((card) => card.kind === "response")!;
+    const branchID = await session.submitNativeBranch(
+      [excerptCard.id, citeCard.id, responseCard.id],
+      "Combine these",
+      undefined,
+      50,
+      async () => ({ messageIndex: 2 }),
+      () => {},
+    );
+    const branchTurn = {
+      id: "50:200", messageIndex: 2, prompt: "Combine these",
+      answer: "Synthesized explanation.", sources: [],
+    };
+    await session.syncConversation([turn1, branchTurn]);
+
+    let capturedPayload!: NativeBranchSubmission;
+    const noteURI = await session.crystallize([branchID], 50, async (payload, onSent) => {
+      capturedPayload = payload;
+      onSent({ messageIndex: 4 });
+      return "## 问题\n总结内容";
+    });
+
+    assert.equal(noteURI, "zotero://select/library/items/NOTE0001");
+    assert.match(capturedPayload.prompt, /整理为中文笔记/);
+    assert.match(capturedPayload.markdown, /Edge bitmap uses >> 1\./);
+    assert.match(capturedPayload.markdown, /Cited Paper/);
+    assert.match(capturedPayload.markdown, /Main answer\./);
+    assert.match(capturedPayload.markdown, /Synthesized explanation\./);
+    assert.deepEqual(savedNote, {
+      text: "## 问题\n总结内容",
+      sources: [
+        { uri: excerptAnchor.uri, label: "PDF 第 2 页" },
+        { uri: citedRef.uri, label: "Cited Paper" },
+        { uri: answerAnchor.uri, label: "PDF 第 5 页" },
+      ],
+    });
+
+    const noteTurn = {
+      id: "50:300", messageIndex: 4, prompt: capturedPayload.prompt,
+      answer: "## 问题\n总结内容", sources: [],
+    };
+    await session.syncConversation([turn1, branchTurn, noteTurn]);
+    const afterSync = (await session.ready()).document;
+    assert.ok(!afterSync.cards.some((card) => card.importedTurn === "50:300" || card.nativeTurn === "50:300"));
+    assert.deepEqual(afterSync.hiddenTurns, ["50:300"]);
   } finally {
     await session.close();
   }

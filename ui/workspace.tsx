@@ -6,22 +6,18 @@ import {
 import {
   ArrowDown, BookOpen, Check, Combine, Focus, GitFork, LibraryBig,
   ListTree, LoaderCircle, Maximize, Minus, Network, Plus,
-  Redo2, Settings2, Sparkles, Trash2, Undo2,
+  Redo2, Sparkles, Trash2, Undo2,
 } from "lucide-react";
 import { ancestors } from "../shared/graph";
 import type { Command, Position, Snapshot } from "../shared/schema";
 import type { Bridge } from "./bridge";
 import { CardNode, CardPreview, cardActions, type FlowCard } from "./cards";
-import { QuestionComposer, type Composer } from "./composer";
-import { Dialog, LibraryDialog, SettingsDialog } from "./dialogs";
+import { Dialog, LibraryDialog } from "./dialogs";
 import { organizeCards } from "./layout";
 
 const nodeTypes = { card: CardNode };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
-type OpenQuestion = Composer & {
-  conversationKey: Snapshot["conversationKey"]; draftKey: string;
-  request: string; mode: "pending" | "native" | "canvas"; source?: string;
-};
+type OpenQuestion = { request: string; trigger?: HTMLButtonElement };
 
 export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapshot }) {
   const [snapshot, setSnapshot] = useState(initial);
@@ -32,7 +28,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   const questionSequence = useRef(0);
   const questionKeys = useRef(new Map<string, string>());
   const drafts = useRef(new Map<string, string>());
-  const [modal, setModal] = useState<"settings" | "library" | "remove" | { cardId: string; trigger: HTMLButtonElement }>();
+  const [modal, setModal] = useState<"library" | "remove" | { cardId: string; trigger: HTMLButtonElement }>();
   const [notice, setNotice] = useState<{ text: string; error?: boolean }>();
   const [crystallizing, setCrystallizing] = useState(false);
   const [organizing, setOrganizing] = useState(false);
@@ -113,7 +109,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
       firstFrame.current = true;
       setSelected([]);
       setFocusId("");
-      setQuestion((current) => current?.mode === "canvas" ? undefined : current);
+      setQuestion(undefined);
       drafts.current.clear();
       setModal(undefined);
     }
@@ -160,7 +156,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     return () => window.removeEventListener("keydown", handle);
   }, [act]);
 
-  const openQuestion = useCallback((parents: string[], anchor: Composer["anchor"], quote?: string, trigger?: HTMLButtonElement) => {
+  const openQuestion = useCallback((parents: string[], anchor: () => DOMRect | undefined, quote?: string, trigger?: HTMLButtonElement) => {
     const conversationKey = snapshot.conversationKey;
     const continuesMain = Boolean(conversationKey && !quote?.trim() && parents.length === 1 && lastMain && parents[0] === lastMain.id);
     const composerParents = continuesMain ? [] : parents;
@@ -168,15 +164,12 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     const request = String(++questionSequence.current);
     const source = parents.length === 1 ? cards.find((card) => card.id === parents[0])?.title :
       parents.length ? `${parents.length} 张卡片` : undefined;
-    setQuestion({ parents, quote, anchor, trigger, conversationKey, draftKey, request, mode: "pending", source });
+    setQuestion({ request, trigger });
     questionKeys.current.set(request, draftKey);
     const bounds = anchor();
     void bridge.call({
       type: "openComposer", request, parents: composerParents, quote, source, draft: drafts.current.get(draftKey) ?? "",
       anchor: bounds && { left: bounds.left, top: bounds.top, bottom: bounds.bottom },
-    }).then((opened) => {
-      if (!opened) questionKeys.current.delete(request);
-      setQuestion((current) => current?.request === request ? { ...current, mode: opened ? "native" : "canvas" } : current);
     }).catch((error) => {
       questionKeys.current.delete(request);
       setQuestion((current) => current?.request === request ? undefined : current);
@@ -191,7 +184,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   }, [bridge, question?.request]);
 
   useEffect(() => {
-    if (question?.mode !== "native") return;
+    if (!question) return;
     const dismiss = (event: PointerEvent) => {
       if (question.trigger?.contains(event.target as Node)) return;
       setQuestion(undefined);
@@ -199,7 +192,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     window.addEventListener("pointerdown", dismiss);
     return () => window.removeEventListener("pointerdown", dismiss);
   }, [question]);
-  const ask = useCallback((id: string, anchor: Composer["anchor"], quote?: string, trigger?: HTMLButtonElement) => {
+  const ask = useCallback((id: string, anchor: () => DOMRect | undefined, quote?: string, trigger?: HTMLButtonElement) => {
     openQuestion([id], anchor, quote, trigger);
   }, [openQuestion]);
   const actions = useMemo(() => ({
@@ -297,33 +290,10 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     setModal(undefined);
   };
   const preview = typeof modal === "object" ? cards.find((card) => card.id === modal.cardId) : undefined;
-  const composer = question?.mode === "canvas" && question.conversationKey === snapshot.conversationKey && question.parents.every(
-    (id) => cards.some((card) => card.id === id),
-  ) ? question : undefined;
-  const mainConversation = Boolean(composer && !composer.parents.length && composer.conversationKey);
-  const blocked = composer?.parents.length ? ancestors(snapshot.document, composer.parents).some((card) => card.status === "streaming") : false;
 
   function askFromButton(parents: string[], trigger: HTMLButtonElement) {
     openQuestion(parents, () => trigger.isConnected ? trigger.getBoundingClientRect() : undefined, undefined, trigger);
   }
-
-  const questionForm = composer && <QuestionComposer key={composer.draftKey} composer={composer} source={composer.source} blocked={blocked}
-    mainConversation={mainConversation} draft={drafts.current.get(composer.draftKey) ?? ""}
-    updateDraft={(prompt) => {
-      if (prompt) drafts.current.set(composer.draftKey, prompt);
-      else drafts.current.delete(composer.draftKey);
-    }}
-    close={() => setQuestion((current) => current === composer ? undefined : current)}
-    submit={async (prompt) => {
-      if (!composer.parents.length && composer.conversationKey) {
-        await bridge.call({ type: "askConversation", key: composer.conversationKey, prompt });
-        report("已发送到论文对话。");
-      } else {
-        await bridge.call({ type: "branch", parents: composer.parents, quote: composer.quote, prompt });
-      }
-      if (drafts.current.get(composer.draftKey)?.trim() === prompt) drafts.current.delete(composer.draftKey);
-      setQuestion((current) => current === composer ? undefined : current);
-    }} />;
 
   return <div className="shell">
     <header className="topbar">
@@ -335,7 +305,6 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
           : <span className="save-status" role="status">{connectionText}</span>}
         <button className="icon-button" title="引用本地文献" aria-label="引用本地文献"
           onClick={() => setModal("library")}><LibraryBig size={17} /></button>
-        <button className="icon-button" title="模型设置" aria-label="模型设置" onClick={() => setModal("settings")}><Settings2 size={18} /></button>
       </div>
     </header>
     <div className="workspace">
@@ -401,11 +370,9 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
         </div>}
       </main>
     </div>
-    {preview ? <cardActions.Provider value={actions}>
-      <CardPreview key={preview.id} card={preview} bridge={bridge} close={close}>{questionForm}</CardPreview>
-    </cardActions.Provider> : questionForm}
-    {modal === "settings" && <SettingsDialog value={snapshot.settings} close={close}
-      save={(settings, key) => bridge.call({ type: "settings", settings, key })} />}
+    {preview && <cardActions.Provider value={actions}>
+      <CardPreview key={preview.id} card={preview} bridge={bridge} close={close} />
+    </cardActions.Provider>}
     {modal === "library" && <LibraryDialog call={bridge.call} close={close} />}
     {modal === "remove" && <Dialog title={removingNativeBranch ? "从画布归档移除" : "移除选中的卡片"} close={close}>
       <p className="muted">

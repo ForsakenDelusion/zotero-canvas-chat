@@ -135,36 +135,6 @@ h1, h2, p { margin: 0; }
 .stream-label i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.2s ease-in-out infinite; }
 .card-error { color: var(--error); font-size: 12px; line-height: 1.5; }
 .muted { color: var(--muted); }
-.question-composer {
-  position: fixed;
-  z-index: 10;
-  display: grid;
-  gap: 5px;
-  width: min(344px, calc(100vw - 16px));
-  max-height: calc(100vh - 16px);
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--paper);
-  box-shadow: var(--popover-shadow);
-}
-.question-context { display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: 5px; color: var(--muted); font-size: 11px; }
-.question-context > svg, .question-context > strong { flex-shrink: 0; }
-.question-context > strong { color: var(--ink); font-size: 12px; font-weight: 600; }
-.question-context > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.question-context .question-close { width: 26px; height: 26px; flex-basis: 26px; margin-left: auto; }
-.question-quote { margin: 0 5px; padding: 2px 8px; max-height: 4.5em; overflow: auto; border-left: 2px solid var(--edge); color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.question-composer textarea { background: var(--tint); border-color: transparent; color: var(--ink); resize: vertical; font-size: 13px; line-height: 1.5; }
-.question-composer textarea:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.question-status { padding: 2px 5px; font-size: 12px; overflow-wrap: anywhere; }
-.question-status:not(.card-error) { color: var(--muted); }
-.question-actions { display: flex; align-items: flex-end; gap: 4px; }
-.question-suggestions { display: flex; flex-wrap: wrap; gap: 2px; }
-.question-suggestions button { font-size: 11px; color: var(--muted); padding: 5px 6px; }
-.question-actions .question-send { margin-left: auto; background: var(--tint); color: var(--ink); }
-.question-actions .question-send:hover:not(:disabled) { background: var(--hover); }
 .empty, .boot { display: flex; align-items: center; flex-direction: column; gap: 13px; text-align: center; }
 .boot { height: 100%; justify-content: center; }
 .boot h1 { font-size: 23px; }
@@ -205,21 +175,9 @@ dialog::backdrop { background: #00000055; }
 dialog form { display: grid; gap: 12px; }
 dialog label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
 input, textarea, select { width: 100%; min-height: 37px; background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 7px; padding: 8px 10px; }
-.provider-picker { position: relative; min-width: 0; }
-.provider-picker select { appearance: none; display: block; padding-inline-end: 34px; cursor: pointer; }
-.provider-chevron {
-  position: absolute;
-  top: 50%;
-  inset-inline-end: 11px;
-  transform: translateY(-50%);
-  color: var(--muted);
-  pointer-events: none;
-}
 textarea { resize: vertical; max-height: 40vh; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }
 .field-note { font-size: 12px; line-height: 1.5; }
-.checkbox-line { display: flex; align-items: center; gap: 6px; }
-.checkbox-line input { width: auto; min-height: auto; }
 .search-form { grid-template-columns: minmax(0, 1fr) auto; }
 .search-form + p { margin-top: 12px; }
 .search-results { display: grid; gap: 5px; margin-top: 13px; max-height: 48vh; overflow: auto; }

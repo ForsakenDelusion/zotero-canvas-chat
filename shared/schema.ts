@@ -55,15 +55,8 @@ export const documentSchema = z.object({
   }
 });
 
-export const settingsSchema = z.object({
-  provider: z.enum(["compatible", "anthropic", "ollama"]),
-  endpoint: z.string().trim().max(2048),
-  model: z.string().trim().max(200),
-});
-
 export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
-  z.object({ type: z.literal("askConversation"), key: z.number().int(), prompt: z.string().trim().min(1).max(20000) }),
   z.object({
     type: z.literal("openComposer"), request: id, parents: z.array(id).max(50),
     quote: z.string().max(50000).optional(), source: z.string().max(500).optional(), draft: z.string().max(20000),
@@ -76,20 +69,17 @@ export const commandSchema = z.discriminatedUnion("type", [
     anchor: z.object({ left: z.number(), right: z.number(), top: z.number(), bottom: z.number() }),
   }),
   z.object({ type: z.literal("closeAnswerCitation"), prefix: id }),
-  z.object({ type: z.literal("branch"), parents: z.array(id).max(50), prompt: z.string().trim().min(1).max(20000), quote: z.string().max(50000).optional() }),
   z.object({ type: z.literal("move"), positions: z.array(position.extend({ id })).max(1000) }),
   z.object({ type: z.literal("viewport"), viewport: viewportSchema }),
   z.object({ type: z.literal("remove"), ids: z.array(id).max(1000) }),
   z.object({ type: z.literal("undo") }),
   z.object({ type: z.literal("redo") }),
-  z.object({ type: z.literal("retry"), id }),
   z.object({ type: z.literal("stop"), id }),
   z.object({ type: z.literal("source"), id, index: z.number().int().nonnegative().optional() }),
   z.object({ type: z.literal("image"), id }),
   z.object({ type: z.literal("search"), query: z.string().trim().min(1).max(200) }),
   z.object({ type: z.literal("cite"), uri: z.string().regex(itemUri) }),
   z.object({ type: z.literal("crystallize"), ids: z.array(id).min(1).max(50) }),
-  z.object({ type: z.literal("settings"), settings: settingsSchema, key: z.string().max(5000).optional() }),
   z.object({ type: z.literal("save") }),
 ]);
 export const requestSchema = z.object({ channel: z.literal("zcanvas:request"), id, command: commandSchema });
@@ -98,7 +88,6 @@ export type Anchor = z.infer<typeof anchorSchema>;
 export type Reference = z.infer<typeof referenceSchema>;
 export type Card = z.infer<typeof cardSchema>;
 export type CanvasDocument = z.infer<typeof documentSchema>;
-export type Settings = z.infer<typeof settingsSchema>;
 export type Command = z.infer<typeof commandSchema>;
 export type Position = z.infer<typeof position>;
 export type Excerpt = { quote?: string; anchor: Anchor };
@@ -119,7 +108,6 @@ export type Snapshot = {
   conversationKey?: number;
   undo: boolean;
   redo: boolean;
-  settings: Settings & { hasKey: boolean };
   saved: boolean;
   saveError?: string;
 };
@@ -131,14 +119,11 @@ export type Event =
   | { type: "citationClosed"; prefix: string; index: number; restoreFocus: boolean };
 export type Reply = {
   ready: Snapshot;
-  openComposer: boolean;
   readCitedAnswer: CitedAnswer | null;
-  branch: string;
   search: Reference[];
   image: string | null;
   crystallize: string;
 };
 export type Result<T extends Command["type"]> = T extends keyof Reply ? Reply[T] : void;
 
-export const defaultSettings: Settings = { provider: "compatible", endpoint: "https://api.openai.com/v1", model: "" };
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);

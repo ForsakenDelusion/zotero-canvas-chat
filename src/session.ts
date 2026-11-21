@@ -1,9 +1,8 @@
-import { ancestors, emptyDocument, messagesFor, nativeBranchContext, nextPosition, paperContext, type Message, type NativeBranchContext } from "../shared/graph";
+import { ancestors, emptyDocument, nativeBranchContext, nextPosition, type NativeBranchContext } from "../shared/graph";
 import {
-  defaultSettings, documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
-  type Command, type ConversationTurn, type Event, type Excerpt, type Reference, type Settings, type Snapshot,
+  documentSchema, errorMessage, type Anchor, type CanvasDocument, type Card,
+  type Command, type ConversationTurn, type Event, type Excerpt, type Reference, type Snapshot,
 } from "../shared/schema";
-import { modelEndpoint } from "./model";
 
 export type NativeBranchSubmission = NativeBranchContext & { prompt: string };
 
@@ -11,10 +10,6 @@ export interface CanvasHost {
   paper: Reference;
   load(): Promise<CanvasDocument | null>;
   save(document: CanvasDocument): Promise<void>;
-  getSettings(): Settings & { hasKey: boolean };
-  setSettings(settings: Settings, key?: string): void;
-  generate(system: string, messages: Message[], signal: AbortSignal): AsyncIterable<string>;
-  controller(): AbortController;
   image(anchor: Anchor): Promise<string | null>;
   open(uri: string): void;
   search(query: string): Promise<Reference[]>;
@@ -36,9 +31,7 @@ export class CanvasSession {
   private readonly previous: HistoryEntry[] = [];
   private readonly next: HistoryEntry[] = [];
   private readonly pendingHidden = new Map<string, PendingHiddenBranch>();
-  private readonly jobs = new Map<string, AbortController>();
   private readonly nativeJobs = new Map<string, { stop: () => void; timeout: ReturnType<typeof setTimeout> }>();
-  private readonly noteJobs = new Set<AbortController>();
   private readonly initialized: Promise<void>;
   private queue = Promise.resolve();
   private queuedSave?: ReturnType<typeof setTimeout>;
@@ -65,9 +58,8 @@ export class CanvasSession {
     return {
       document: this.document,
       paper: this.host.paper,
-      undo: this.previous.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
-      redo: this.next.length > 0 && this.jobs.size === 0 && this.nativeJobs.size === 0,
-      settings: this.host.getSettings(),
+      undo: this.previous.length > 0 && this.nativeJobs.size === 0,
+      redo: this.next.length > 0 && this.nativeJobs.size === 0,
       saved: this.saved,
       saveError: this.saveError,
     };
@@ -138,19 +130,14 @@ export class CanvasSession {
     };
   }
 
-  addExcerpt(excerpt: Excerpt, autoBranch: boolean) {
+  addExcerpt(excerpt: Excerpt) {
     return this.serial(async () => {
       const card = this.newCard({
         kind: "excerpt", title: excerpt.anchor.image ? "PDF 区域截图" : "PDF 原文摘录",
         anchor: excerpt.anchor, quote: excerpt.quote?.slice(0, 50000),
       }, []);
-      const cards = [...this.document.cards, card];
-      const child = autoBranch ? this.newCard({
-        kind: "branch", title: "解释这段摘录", prompt: "解释这段摘录的核心意思、关键术语及它在论文中的作用。",
-      }, [card], cards) : null;
-      this.update(child ? [...cards, child] : cards);
+      this.update([...this.document.cards, card]);
       this.emit({ type: "focus", id: card.id });
-      if (child) this.start(child);
       await this.save();
     });
   }
@@ -392,41 +379,45 @@ export class CanvasSession {
     this.emit({ type: "card", card: patched });
   }
 
-  private async run(card: Card, path: Card[], controller: AbortController) {
-    let answer = "";
-    const timeout = setTimeout(() => controller.abort(), 180_000);
-    try {
-      const messages = await messagesFor(path, card.prompt!, card.quote, (anchor) => this.host.image(anchor),
-        path.some((entry) => entry.parents.length > 1) || card.kind === "synthesis");
-      for await (const chunk of this.host.generate(paperContext(this.host.paper), messages, controller.signal)) {
-        if (controller.signal.aborted) break;
-        answer = (answer + chunk).slice(0, 65000);
-        this.patch(card.id, { answer });
-        this.scheduleSave();
-        if (answer.length === 65000) break;
+  async crystallize(
+    ids: string[],
+    conversationKey: number,
+    send: (
+      payload: NativeBranchSubmission,
+      onSent: (info: { messageIndex?: number }) => void,
+    ) => Promise<string>,
+  ): Promise<string> {
+    const { payload, sources } = await this.serial(async () => {
+      if (this.disposed) throw new Error("画布已关闭。");
+      const parents = [...new Set(ids)].map((id) => this.getCard(id));
+      const path = ancestors(this.document, parents.map((parent) => parent.id));
+      if (path.some((card) => card.status === "streaming")) throw new Error("请等选中路径生成完毕。");
+      const prompt = "把上述阅读记录整理为中文笔记。用 Markdown 标题和列表梳理问题、结论、证据和待验证事项。";
+      const context = await nativeBranchContext(path, parents, undefined, (anchor) => this.host.image(anchor), conversationKey);
+      const collected = new Map<string, string>();
+      for (const card of path) {
+        if (card.anchor) collected.set(card.anchor.uri, `PDF 第 ${card.anchor.page} 页`);
+        for (const anchor of card.sources ?? []) collected.set(anchor.uri, `PDF 第 ${anchor.page} 页`);
+        if (card.reference) collected.set(card.reference.uri, card.reference.title);
       }
-      if (controller.signal.aborted) this.patch(card.id, { status: "stopped" });
-      else if (answer.trim()) this.patch(card.id, { status: "done" });
-      else throw new Error("模型未返回文本，请重试。");
-    } catch (error) {
-      this.patch(card.id, controller.signal.aborted
-        ? { status: "stopped" }
-        : { status: "error", error: errorMessage(error).slice(0, 1000) });
-    } finally {
-      clearTimeout(timeout);
-      this.jobs.delete(card.id);
-      if (!this.disposed) await this.serial(() => this.save());
-    }
-  }
-
-  private start(card: Card) {
-    if (!card.prompt || this.jobs.has(card.id)) return;
-    const path = ancestors(this.document, card.parents);
-    const controller = this.host.controller();
-    this.jobs.set(card.id, controller);
-    this.patch(card.id, { status: "streaming", answer: "", error: undefined });
-    this.emit();
-    void this.run(card, path, controller).catch(() => undefined);
+      return {
+        payload: { prompt, ...context },
+        sources: [...collected].map(([uri, label]) => ({ uri, label })),
+      };
+    });
+    const text = await send(payload, ({ messageIndex }) => {
+      if (!conversationKey) return;
+      const pendingId = `note:${globalThis.crypto.randomUUID()}`;
+      this.pendingHidden.set(pendingId, {
+        id: pendingId,
+        conversationKey,
+        messageIndex,
+        prompt: payload.prompt,
+      });
+    });
+    if (this.disposed) throw new Error("画布已关闭。");
+    if (!text.trim()) throw new Error("模型未生成笔记正文。");
+    return await this.host.note(text, sources);
   }
 
   async command(command: Command): Promise<unknown> {
@@ -445,54 +436,12 @@ export class CanvasSession {
         const anchor = this.getCard(command.id).anchor;
         return anchor?.image ? this.host.image(anchor) : null;
       }
-      case "crystallize": {
-        const path = ancestors(this.document, command.ids);
-        if (path.some((card) => card.status === "streaming")) throw new Error("请等选中路径生成完毕。");
-        const messages = await messagesFor(path,
-          "把上述阅读记录整理为中文笔记。用 Markdown 标题和列表梳理问题、结论、证据和待验证事项。", undefined,
-          (anchor) => this.host.image(anchor), true);
-        const controller = this.host.controller();
-        this.noteJobs.add(controller);
-        const timeout = setTimeout(() => controller.abort(), 180_000);
-        try {
-          let text = "";
-          for await (const chunk of this.host.generate(paperContext(this.host.paper), messages, controller.signal)) {
-            text = (text + chunk).slice(0, 65000);
-            if (text.length === 65000) break;
-          }
-          if (controller.signal.aborted || this.disposed) throw new Error("笔记生成已停止。");
-          if (!text.trim()) throw new Error("模型未生成笔记正文。");
-          const sources = new Map<string, string>();
-          for (const card of path) {
-            if (card.anchor) sources.set(card.anchor.uri, `PDF 第 ${card.anchor.page} 页`);
-            for (const anchor of card.sources ?? []) sources.set(anchor.uri, `PDF 第 ${anchor.page} 页`);
-            if (card.reference) sources.set(card.reference.uri, card.reference.title);
-          }
-          return await this.host.note(text, [...sources].map(([uri, label]) => ({ uri, label })));
-        } finally {
-          clearTimeout(timeout);
-          this.noteJobs.delete(controller);
-        }
-      }
+      case "crystallize":
+        throw new Error("请在 LLM for Zotero 中生成阅读笔记。");
     }
     return this.serial(async () => {
       if (this.disposed) throw new Error("画布已关闭。");
       switch (command.type) {
-        case "branch": {
-          const parents = [...new Set(command.parents)].map((id) => this.getCard(id));
-          if (ancestors(this.document, parents.map((parent) => parent.id)).some((card) => card.status === "streaming")) {
-            throw new Error("请等上游卡片生成完毕。");
-          }
-          const card = this.newCard({
-            kind: parents.length > 1 ? "synthesis" : "branch",
-            title: command.prompt.slice(0, 80), prompt: command.prompt, quote: command.quote,
-          }, parents);
-          this.update([...this.document.cards, card]);
-          this.start(card);
-          this.emit({ type: "focus", id: card.id });
-          await this.save();
-          return card.id;
-        }
         case "move": {
           const positions = new Map(command.positions.map(({ id, ...position }) => [id, position]));
           this.update(this.document.cards.map((card) => ({ ...card, ...positions.get(card.id) })));
@@ -522,7 +471,6 @@ export class CanvasSession {
             }
           }
           for (const id of ids) {
-            this.jobs.get(id)?.abort();
             const native = this.nativeJobs.get(id);
             if (native) {
               native.stop();
@@ -536,7 +484,7 @@ export class CanvasSession {
         }
         case "undo":
         case "redo": {
-          if (this.jobs.size || this.nativeJobs.size) return;
+          if (this.nativeJobs.size) return;
           const from = command.type === "undo" ? this.previous : this.next;
           const to = command.type === "undo" ? this.next : this.previous;
           const entry = from.pop();
@@ -545,14 +493,7 @@ export class CanvasSession {
           this.update(entry.cards, false, entry.hiddenTurns);
           break;
         }
-        case "retry": {
-          const card = this.getCard(command.id);
-          if (card.importedTurn || card.nativeBranch) throw new Error("请在论文对话中重试这条消息。");
-          this.start(card);
-          break;
-        }
         case "stop":
-          this.jobs.get(command.id)?.abort();
           this.nativeJobs.get(command.id)?.stop();
           return;
         case "cite": {
@@ -562,18 +503,6 @@ export class CanvasSession {
           this.emit({ type: "focus", id: card.id });
           break;
         }
-        case "settings": {
-          const endpoint = modelEndpoint(command.settings);
-          const current = this.host.getSettings();
-          let changed = current.provider !== command.settings.provider;
-          if (!changed) {
-            try { changed = modelEndpoint(current) !== endpoint; }
-            catch { changed = true; }
-          }
-          this.host.setSettings(command.settings, command.key ?? (changed ? "" : undefined));
-          this.emit();
-          return;
-        }
         case "save": break;
       }
       await this.save();
@@ -582,8 +511,6 @@ export class CanvasSession {
 
   async close() {
     this.disposed = true;
-    for (const controller of this.jobs.values()) controller.abort();
-    for (const controller of this.noteJobs) controller.abort();
     for (const job of this.nativeJobs.values()) clearTimeout(job.timeout);
     this.nativeJobs.clear();
     this.listeners.clear();
@@ -670,5 +597,3 @@ function replacedResponse(cards: Iterable<Card>, turn: ConversationTurn, previou
   if (indexed.length === 1) return indexed[0];
   if (!indexed.length && legacy.length === 1) return legacy[0];
 }
-
-export const initialSettings = () => ({ ...defaultSettings, hasKey: false });

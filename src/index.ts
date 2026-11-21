@@ -2,7 +2,7 @@ import { conversationCards } from "../shared/graph";
 import { errorMessage, requestSchema, type Excerpt, type Snapshot } from "../shared/schema";
 import { hostColors, type CanvasTheme } from "../shared/theme";
 import { makeAnchor, parentPaper, zoteroHost } from "./library";
-import { askConversation, conversationAt, observeConversation } from "./llm-turn";
+import { conversationAt, observeConversation } from "./llm-turn";
 import { watchLLMWindows } from "./llm-window";
 import { nativeCitations } from "./native-citations";
 import { nativeComposer } from "./native-composer";
@@ -127,15 +127,13 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
         if (command.type === "ready") {
           await syncing;
           value = project(await session.ready());
-        } else if (command.type === "askConversation") {
-          askConversation(container, paper.id, command.key, command.prompt);
         } else if (command.type === "openComposer") {
           if (conversationKey && conversationAt(container, paper.id)?.key !== conversationKey) {
             throw new Error("当前论文对话已切换。请重新打开提问框。");
           }
           if (command.parents.some((id) => !visibleIDs.has(id))) throw new Error("来源卡片已不在当前画布。");
           citations.dismiss();
-          value = composer.open(command);
+          composer.open(command);
         } else if (command.type === "closeComposer") {
           composer.close(command.request);
         } else if (command.type === "readCitedAnswer") {
@@ -150,6 +148,19 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
           citations.open(command);
         } else if (command.type === "closeAnswerCitation") {
           citations.dismiss(command.prefix);
+        } else if (command.type === "crystallize") {
+          const currentKey = conversationAt(container, paper.id)?.key ?? 0;
+          if (!currentKey || (conversationKey && currentKey !== conversationKey)) {
+            throw new Error(conversationKey ? "当前论文对话已切换。请重试。" : "请先在 LLM for Zotero 中打开这篇文献的论文对话。");
+          }
+          if (command.ids.some((id) => !visibleIDs.has(id))) throw new Error("选中的卡片已不在当前画布。");
+          citations.dismiss();
+          composer.close();
+          value = await session.crystallize(
+            command.ids,
+            currentKey,
+            (payload, onSent) => composer.summarize(currentKey, payload, onSent),
+          );
         } else value = await session.command(command);
         reply.postMessage({ id, ok: true, value });
       } catch (error) {
@@ -203,7 +214,7 @@ function llmForZoteroInstalled() {
 function openFromReader(paper: Zotero.Item, excerpt?: Excerpt) {
   void (async () => {
     await injectedUI?.openPaper(paper.id);
-    if (excerpt) await sessionFor(paper).addExcerpt(excerpt, true);
+    if (excerpt) await sessionFor(paper).addExcerpt(excerpt);
   })().catch((error) => Zotero.getMainWindow()?.alert(errorMessage(error)));
 }
 
