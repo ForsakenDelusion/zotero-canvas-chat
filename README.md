@@ -1,10 +1,11 @@
 # Canvas Chat
 
 [![Latest Release](https://img.shields.io/github/v/release/ForsakenDelusion/zotero-canvas-chat)](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases)
+[![Zotero 中文社区 · 已收录](https://zotero-chinese.com/badges/listed.svg)](https://zotero-chinese.com/plugins/)
 [![CI](https://github.com/ForsakenDelusion/zotero-canvas-chat/actions/workflows/ci.yml/badge.svg)](https://github.com/ForsakenDelusion/zotero-canvas-chat/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-[下载安装包](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
+[下载安装包](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases) · [中文社区插件商店](https://zotero-chinese.com/plugins/) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
 
 **Canvas Chat** 是面向 [LLM-for-Zotero](https://github.com/yilewang/llm-for-zotero) 的独立维护的附属插件。它在同一窗口内把当前论文对话显示为画布，让你基于 PDF 摘录或已有回答继续追问，并把选中的阅读路径整理成带原文跳转的 Zotero 笔记。
 
@@ -59,11 +60,11 @@
 ## 快速开始
 
 1. 安装并启用官方 [LLM-for-Zotero v3.9.20](https://github.com/yilewang/llm-for-zotero/releases/tag/v3.9.20)。
-2. 从 [Canvas Chat Releases](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases) 下载 `zotero-canvas-chat-<版本>.xpi`。
+2. 从 [Zotero 中文社区插件商店](https://zotero-chinese.com/plugins/) 搜索 `Canvas Chat` 下载，或从 [Canvas Chat Releases](https://github.com/ForsakenDelusion/zotero-canvas-chat/releases) 下载 `zotero-canvas-chat-<版本>.xpi`。
 3. 在 Zotero 中打开 `工具 (Tools)` -> `插件 (Add-ons)` -> 点击右上角齿轮图标 -> 选择 **Install Add-on From File**，选择 `.xpi` 文件完成安装。
 4. 打开任意一篇文献的 PDF，在右侧 LLM-for-Zotero 面板顶部点击 **「画布」** 即可切换到当前论文的画布视图。
 
-首发在 macOS 的 Zotero 7.0.32、8.0.4 和 10.0.9 上搭配官方 LLM-for-Zotero 3.9.20 验证。画布使用 LLM-for-Zotero 的窗口和对话控件，宿主更新可能影响兼容性。后续版本可通过 Zotero 检查更新，也可从 Releases 下载后覆盖安装。
+首发在 macOS 的 Zotero 7.0.32、8.0.4 和 10.0.9 上搭配官方 LLM-for-Zotero 3.9.20 验证。画布使用 LLM-for-Zotero 的窗口和对话控件，宿主更新可能影响兼容性。后续版本可通过 Zotero 检查更新，也可从插件商店或 Releases 下载后覆盖安装。
 
 ## 使用指南
 
