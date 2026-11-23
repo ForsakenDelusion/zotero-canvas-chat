@@ -66,7 +66,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   useEffect(() => bridge.subscribe((event) => {
     if (event.type === "snapshot") setSnapshot(event.snapshot);
     if (event.type === "card") setSnapshot((state) => ({
-      ...state, saved: false, document: {
+      ...state, saved: event.card.status === "streaming" ? state.saved : false, document: {
         ...state.document,
         cards: state.document.cards.map((card) => card.id === event.card.id ? event.card : card),
       },
@@ -83,6 +83,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     }
   }), [bridge]);
 
+  const focusMeasured = Boolean(focusId && measurements[focusId]?.width && measurements[focusId]?.height);
   useEffect(() => {
     void bridge.call({ type: "ready" }).then(setSnapshot).catch((error) => report(errorMessage(error), true));
     const demoSource = () => report("演示 PDF 第 4 页");
@@ -142,7 +143,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     } else if (defaultView || !visible.length) {
       void flow.fitView({ padding: 0.3, maxZoom: 1 });
     }
-  }, [canvasVisible, nodesInitialized, flow, focusId, snapshot.conversationKey, lastTurn?.id]);
+  }, [canvasVisible, nodesInitialized, flow, focusId, focusMeasured, snapshot.conversationKey, lastTurn?.id]);
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {

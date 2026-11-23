@@ -98,6 +98,7 @@ export type ConversationTurn = {
   sources: Anchor[];
   messageIndex?: number;
   stopped?: boolean;
+  streaming?: boolean;
   branchID?: string;
   quotedTexts?: string[];
 };

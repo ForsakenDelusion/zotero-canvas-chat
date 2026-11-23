@@ -88,11 +88,16 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   });
   const stopObserving = observeConversation(container, paper.id, (key, turns, partial) => {
     const entries = turns.map((turn) => ({
-      id: `${key}:${turn.timestamp}`, prompt: turn.question || "论文对话", answer: turn.answer,
+      id: turn.timestamp ? `${key}:${turn.timestamp}` : `${key}:streaming:${turn.messageIndex}`,
+      prompt: turn.question || "论文对话", answer: turn.answer,
       sources: sourceAnchors(paper, turn.sources), messageIndex: turn.messageIndex,
-      stopped: turn.stopped, branchID: turn.branchID, quotedTexts: turn.quotedTexts,
+      stopped: turn.stopped, streaming: turn.streaming || undefined,
+      branchID: turn.branchID, quotedTexts: turn.quotedTexts,
     }));
     if (conversationKey !== key) citations.reset();
+    const previousKey = conversationKey;
+    const previousTurns = [...turnIDs];
+    const previousBranches = [...branchTurns.entries()];
     if (!partial || conversationKey !== key) {
       turnIDs = new Set();
       branchTurns = new Map();
@@ -102,10 +107,17 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
       if (turn.branchID) branchTurns.set(turn.branchID, turn.id);
     }
     conversationKey = key;
-    syncing = session.syncConversation(entries, partial).then(async () => {
+    const viewChanged = previousKey !== key ||
+      previousTurns.length !== turnIDs.size ||
+      previousTurns.some((id) => !turnIDs.has(id)) ||
+      previousBranches.length !== branchTurns.size ||
+      previousBranches.some(([id, turn]) => branchTurns.get(id) !== turn);
+    syncing = session.syncConversation(entries, partial, key).then(async (outcome) => {
       if (!port || !connected) return;
-      const snapshot = project(await session.ready());
-      if (connected) port?.postMessage({ event: { type: "snapshot", snapshot } });
+      if (viewChanged && outcome !== "snapshot") {
+        const snapshot = project(await session.ready());
+        if (connected) port?.postMessage({ event: { type: "snapshot", snapshot } });
+      }
     }).catch((error) => Zotero.logError(error));
   });
   const connect = () => {
@@ -161,6 +173,11 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
             currentKey,
             (payload, onSent) => composer.summarize(currentKey, payload, onSent),
           );
+        } else if (command.type === "stop") {
+          const handled = await session.command(command);
+          if (!handled && visibleIDs.has(command.id)) {
+            conversationAt(container, paper.id)?.chat.querySelector<HTMLButtonElement>("#llm-cancel")?.click();
+          }
         } else value = await session.command(command);
         reply.postMessage({ id, ok: true, value });
       } catch (error) {

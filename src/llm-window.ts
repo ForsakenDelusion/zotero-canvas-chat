@@ -16,7 +16,7 @@ const nativeTab = ".llm-standalone-side-panel-tab";
 const plus = ".llm-standalone-side-panel-icon-new-tab";
 const paperChat = "#llm-main[data-conversation-kind='paper']";
 const chatBody = ".llm-standalone-content #llm-main";
-const readerChat = `#zotero-context-pane-item-deck ${paperChat}, item-details[tabType="reader"] ${paperChat}`;
+const readerChat = `#zotero-context-pane-item-deck ${paperChat}, item-details[tabType="reader"] ${paperChat}, item-details[tabType="library"] ${paperChat}`;
 const sidebarToggle = ".llm-standalone-side-panel-toggle";
 const branchContext = ".zcanvas-branch-context";
 const html = "http://www.w3.org/1999/xhtml";
@@ -378,7 +378,7 @@ function attach(win: HostWindow, receiver: Receiver) {
     if (!nextPanel || !strip || !view || !toggle) return false;
     if (panel !== nextPanel || canvasPaperID !== itemID) closeCanvas();
     panel = nextPanel;
-    currentPaperID = paperID();
+    currentPaperID = paperID() || itemID;
     if (panel.hidden) toggle.click();
     if (panel.hidden) return false;
     if (!unmount) {
@@ -415,10 +415,13 @@ function attach(win: HostWindow, receiver: Receiver) {
     if (nextPaperID && nextPanel && toggle) {
       if (topButton.nextElementSibling !== toggle) toggle.before(topButton);
     } else topButton.remove();
-    if (!nextPanel || nextPanel !== panel || nextPaperID !== currentPaperID || panel?.hidden ||
+    const paperChanged = nextPaperID
+      ? nextPaperID !== currentPaperID && nextPaperID !== canvasPaperID
+      : Boolean(chat?.dataset.conversationKind);
+    if (!nextPanel || nextPanel !== panel || paperChanged || panel?.hidden ||
         (unmount && (!content.isConnected || !tab.isConnected))) closeCanvas();
     panel = nextPanel;
-    currentPaperID = nextPaperID;
+    currentPaperID = nextPaperID || (unmount ? currentPaperID : 0);
     const nextSelection = selectedNativeTab();
     if (unmount && nativeSelection !== nextSelection) show(false);
     nativeSelection = nextSelection;
@@ -505,7 +508,7 @@ export function watchLLMWindows(receiver: Receiver) {
   const waiting = new Map<HostWindow, () => void>();
   let stopped = false;
   function attachIfReady(win: HostWindow) {
-    if (stopped || win.closed || windows.has(win)) return;
+    if (stopped || win.closed || windows.has(win) || win.document.readyState === "loading") return;
     const url = win.document.URL;
     if (url === chatURL) windows.set(win, attach(win, receiver));
     if (url === "chrome://zotero/content/zoteroPane.xhtml" || url === "chrome://zotero/content/reader.xhtml") {
@@ -515,6 +518,7 @@ export function watchLLMWindows(receiver: Receiver) {
   function watch(win: HostWindow) {
     attachIfReady(win);
     if (waiting.has(win) || windows.has(win)) return;
+    if (win.document.readyState === "complete" && win.document.URL !== "about:blank") return;
     const load = (event: Event) => {
       if (event.target !== win.document) return;
       unwatch();
@@ -539,7 +543,7 @@ export function watchLLMWindows(receiver: Receiver) {
     },
   };
   Services.ww.registerNotification(listener as nsIObserver);
-  for (const win of Services.wm.getEnumerator("")) attachIfReady(win as unknown as HostWindow);
+  for (const win of Services.wm.getEnumerator("")) watch(win as unknown as HostWindow);
 
   return {
     async openPaper(itemID: number) {

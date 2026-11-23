@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { ArrowDown, ArrowDownRight, ArrowUpRight, BookMarked, Combine, FileText, GitFork, GripHorizontal, Maximize2, MessageSquare, Square } from "lucide-react";
+import { ArrowUpRight, GripHorizontal, Maximize2, Plus, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -10,12 +10,12 @@ import { errorMessage, type Card, type CitedAnswer } from "../shared/schema";
 import type { Bridge } from "./bridge";
 import { Dialog } from "./dialogs";
 
-const kinds = {
-  excerpt: { label: "PDF 摘录", icon: FileText },
-  branch: { label: "分支", icon: GitFork },
-  synthesis: { label: "汇聚", icon: Combine },
-  citation: { label: "文献引用", icon: BookMarked },
-  response: { label: "论文对话", icon: MessageSquare },
+const kindLabels: Record<Card["kind"], string> = {
+  excerpt: "PDF 摘录",
+  branch: "分支",
+  synthesis: "汇聚",
+  citation: "文献引用",
+  response: "论文对话",
 };
 
 export const cardActions = createContext<{
@@ -86,7 +86,6 @@ function CardContent({ card, call, expanded = false }: { card: Card; call: Bridg
     {!expanded && card.prompt && card.prompt !== card.title && <p className="card-prompt">{card.prompt}</p>}
     {expanded && question && (card.answer || card.status) && <h3>回答</h3>}
     {answer}
-    {expanded && card.status === "streaming" && <p className="muted" role="status">生成中…</p>}
     {card.status === "error" && <p className="card-error" role="alert">{card.error}</p>}
     {card.status === "stopped" && <p className="muted">生成已停止。</p>}
   </>;
@@ -94,6 +93,19 @@ function CardContent({ card, call, expanded = false }: { card: Card; call: Bridg
 
 function SelectableCardBody({ card, expanded = false }: { card: Card; expanded?: boolean }) {
   const { ask, call } = useContext(cardActions);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+
+  useEffect(() => {
+    if (card.status !== "streaming") {
+      stickToBottom.current = true;
+      return;
+    }
+    const element = bodyRef.current;
+    if (element && stickToBottom.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [card.answer, card.status]);
 
   function inspectSelection(body: HTMLDivElement) {
     const current = window.getSelection();
@@ -104,8 +116,13 @@ function SelectableCardBody({ card, expanded = false }: { card: Card; expanded?:
     ask(card.id, () => range.startContainer.isConnected ? range.getBoundingClientRect() : undefined, text.slice(0, 50000));
   }
 
-  return <div className={expanded ? "card-body card-preview-body" : "card-body nodrag nowheel"}
+  return <div ref={bodyRef} className={expanded ? "card-body card-preview-body" : "card-body nodrag nowheel"}
     role={expanded ? "region" : undefined} aria-label={expanded ? "卡片内容" : undefined} tabIndex={expanded ? 0 : undefined}
+    onScroll={(event) => {
+      if (card.status !== "streaming") return;
+      const target = event.currentTarget;
+      stickToBottom.current = target.scrollHeight - target.scrollTop - target.clientHeight <= 28;
+    }}
     onMouseUp={(event) => {
       if (event.button === 0) inspectSelection(event.currentTarget);
     }} onKeyUp={(event) => {
@@ -191,7 +208,7 @@ export function CardPreview({ card, bridge, close, children }: {
       });
   }
 
-  return <Dialog className="card-preview" title={kinds[card.kind].label} close={close}>
+  return <Dialog className="card-preview" title={kindLabels[card.kind]} close={close}>
     <answerCitations.Provider value={cited ? { cited, expandedIndex, activate } : undefined}>
       <SelectableCardBody card={card} expanded />
     </answerCitations.Provider>
@@ -202,8 +219,8 @@ export function CardPreview({ card, bridge, close, children }: {
 
 export function CardNode({ data: card }: NodeProps<FlowCard>) {
   const { ask, call, expand, lastMainId } = useContext(cardActions);
-  const { icon: Icon, label } = kinds[card.kind];
   const continuesMain = Boolean(lastMainId && card.id === lastMainId);
+  const askLabel = continuesMain ? "继续对话" : "追问";
 
   return (
     <article className={`card card-${card.kind}`}>
@@ -215,25 +232,24 @@ export function CardNode({ data: card }: NodeProps<FlowCard>) {
       </>}
       <header className="card-head">
         <span className="card-grip" title="拖动卡片" aria-hidden="true"><GripHorizontal size={17} /></span>
-        <span className="card-kind"><Icon size={15} />{label}</span>
         <div className="card-head-actions">
           {card.anchor && <button className="page-chip nodrag" onClick={() => void call({ type: "source", id: card.id })}>
             p. {card.anchor.page} <ArrowUpRight size={12} />
           </button>}
-          {card.status === "streaming" && <span className="stream-label"><i />生成中</span>}
+          {card.status === "streaming" && <span className="stream-dot" role="status" aria-label="生成中" title="生成中" />}
           <button className="icon-button card-expand nodrag" title="展开卡片" aria-label="展开卡片" aria-haspopup="dialog"
             onClick={(event) => { event.stopPropagation(); expand(card.id, event.currentTarget); }}><Maximize2 size={15} /></button>
         </div>
       </header>
       <h2>{card.title}</h2>
       <SelectableCardBody card={card} />
-      <footer className="card-foot">
+      <footer className={`card-foot${card.status !== "streaming" && !card.reference ? " card-foot-ask" : ""}`}>
         {card.status === "streaming" ?
           <button className="nodrag" onClick={() => void call({ type: "stop", id: card.id })}><Square size={13} />停止</button>
-          : <button className="nodrag" onClick={(event) => {
+          : <button className="nodrag card-ask-button" title={askLabel} aria-label={askLabel} onClick={(event) => {
               const trigger = event.currentTarget;
               ask(card.id, () => trigger.isConnected ? trigger.getBoundingClientRect() : undefined, undefined, trigger);
-            }}>{continuesMain ? <><ArrowDown size={14} />继续对话</> : <><ArrowDownRight size={14} />追问</>}</button>}
+            }}><Plus size={15} /></button>}
         {card.reference && <button className="nodrag" onClick={() => void call({ type: "source", id: card.id })}><ArrowUpRight size={14} />查看文献</button>}
       </footer>
       {!!card.sources?.length && <footer className="card-foot" style={{ flexWrap: "wrap" }}>

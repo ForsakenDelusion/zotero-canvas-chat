@@ -7,7 +7,8 @@ import { strToU8, zlibSync } from "fflate";
 import { ancestors, conversationCards, emptyDocument } from "../shared/graph.ts";
 import { nativeBranchPrompt, readNativePrompt } from "../shared/question.ts";
 import { documentSchema, type CanvasDocument, type Reference } from "../shared/schema.ts";
-import { canvasFilePath, migrateLegacyNotes, zoteroHost } from "../src/library.ts";
+import { canvasFilePath, makeAnchor, migrateLegacyNotes, parentPaper, zoteroHost } from "../src/library.ts";
+import { readerHooks } from "../src/reader.ts";
 import { CanvasSession, type NativeBranchSubmission } from "../src/session.ts";
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
@@ -636,4 +637,614 @@ test("local file storage persists session operations, migrates legacy notes, and
     (globalThis as Record<string, unknown>).IOUtils = previousIOUtils;
     await rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test("streaming main-line and branch turns appear immediately, stream live without disk churn, and promote in place", async () => {
+  const paper: Reference = {
+    uri: "zotero://select/library/items/STREAM01",
+    title: "Streaming Paper", authors: "", year: "", abstract: "",
+  };
+  let savedDocs: CanvasDocument[] = [];
+  const session = new CanvasSession({
+    paper,
+    load: async () => null,
+    save: async (document) => {
+      documentSchema.parse(document);
+      savedDocs.push(structuredClone(document));
+    },
+    image: async () => null,
+    open: () => {},
+    search: async () => [],
+    reference: async () => paper,
+    note: async () => "zotero://select/library/items/NOTE0001",
+  });
+  const events: string[] = [];
+  const focused: string[] = [];
+  const cardUpdates: { id: string; answer?: string; status?: string }[] = [];
+  session.subscribe((event) => {
+    events.push(event.type);
+    if (event.type === "focus") focused.push(event.id);
+    if (event.type === "card") cardUpdates.push({ id: event.card.id, answer: event.card.answer, status: event.card.status });
+  });
+
+  try {
+    // Seed an existing completed main-line turn
+    const turn0 = { id: "10:100", messageIndex: 0, prompt: "First question", answer: "First answer", sources: [] };
+    await session.syncConversation([turn0], false, 10);
+    await session.command({ type: "save" });
+    const savesAfterSeed = savedDocs.length;
+
+    // 1. New main-line turn starts streaming before timestamp is assigned
+    const outcome1 = await session.syncConversation([
+      turn0,
+      { id: "10:streaming:2", messageIndex: 2, prompt: "Second question", answer: "", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal(outcome1, "snapshot");
+    const snap1 = await session.ready();
+    assert.equal(snap1.document.cards.length, 2);
+    const liveCard = snap1.document.cards[1];
+    assert.equal(liveCard.kind, "response");
+    assert.equal(liveCard.status, "streaming");
+    assert.equal(liveCard.importedTurn, "10:streaming:2");
+    assert.deepEqual(liveCard.parents, ["llm:10:100"]);
+    assert.deepEqual(focused, [liveCard.id]);
+    // Visible in conversation 10, hidden in conversation 20
+    assert.equal(conversationCards(snap1.document.cards, new Set(["10:100", "10:streaming:2"]), 10).length, 2);
+    assert.equal(conversationCards(snap1.document.cards, new Set(["20:999"]), 20).length, 0);
+    // Transient streaming card is NOT persisted on save
+    await session.command({ type: "save" });
+    assert.equal(savedDocs.at(-1)?.cards.length, 1);
+    const savesBeforeDeltas = savedDocs.length;
+
+    // 2. Streaming deltas update live via card event, handle timestamp appearing, and do not re-focus or save
+    const outcome2 = await session.syncConversation([
+      turn0,
+      { id: "10:200", messageIndex: 2, prompt: "Second question", answer: "Part 1", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal(outcome2, "card");
+    const outcome3 = await session.syncConversation([
+      turn0,
+      { id: "10:200", messageIndex: 2, prompt: "Second question", answer: "Part 1 + Part 2", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal(outcome3, "card");
+    assert.equal(focused.length, 1);
+    assert.equal(savedDocs.length, savesBeforeDeltas);
+    assert.equal(cardUpdates.at(-1)?.id, liveCard.id);
+    assert.equal(cardUpdates.at(-1)?.answer, "Part 1 + Part 2");
+
+    // 3. Dragging the streaming card preserves its position without polluting disk/undo, and stop returns false (delegates to #llm-cancel)
+    await session.command({ type: "move", positions: [{ id: liveCard.id, x: 512, y: 640 }] });
+    assert.equal(savedDocs.length, savesBeforeDeltas);
+    assert.equal(await session.command({ type: "stop", id: liveCard.id }), false);
+    await assert.rejects(session.command({ type: "remove", ids: [liveCard.id] }), /请在论文对话中移除这条消息/);
+
+    // 4. Completion promotes in place with same id and dragged coordinates, then persists
+    const turn2 = { id: "10:200", messageIndex: 2, prompt: "Second question", answer: "Full second answer", sources: [] };
+    const outcome4 = await session.syncConversation([turn0, turn2], false, 10);
+    assert.equal(outcome4, "snapshot");
+    const snapDone = await session.ready();
+    assert.equal(snapDone.document.cards.length, 2);
+    const promoted = snapDone.document.cards[1];
+    assert.equal(promoted.id, liveCard.id);
+    assert.equal(promoted.x, 512);
+    assert.equal(promoted.y, 640);
+    assert.equal(promoted.importedTurn, "10:200");
+    assert.equal(promoted.status, "done");
+    assert.equal(promoted.answer, "Full second answer");
+    await session.command({ type: "save" });
+    assert.equal(savedDocs.at(-1)?.cards.length, 2);
+    assert.equal(savedDocs.at(-1)?.cards[1].id, liveCard.id);
+    assert.ok(savesAfterSeed >= 1);
+
+    // 5. Branch card streams answer live and stops via nativeJobs
+    let branchStopped = false;
+    const branchId = await session.submitNativeBranch([promoted.id], "Deep dive", undefined, 10, async () => ({ messageIndex: 4 }), () => {
+      branchStopped = true;
+    });
+    assert.equal(await session.command({ type: "stop", id: branchId }), true);
+    assert.equal(branchStopped, true);
+    const branchDelta = await session.syncConversation([
+      turn0,
+      turn2,
+      { id: "10:300", messageIndex: 4, prompt: "Deep dive", answer: "Branch streaming...", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal(branchDelta, "card");
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === branchId)?.answer, "Branch streaming...");
+    await session.syncConversation([
+      turn0,
+      turn2,
+      { id: "10:300", messageIndex: 4, prompt: "Deep dive", answer: "Branch final answer", sources: [] },
+    ], false, 10);
+    const finalizedBranch = (await session.ready()).document.cards.find((card) => card.id === branchId);
+    assert.equal(finalizedBranch?.status, "done");
+    assert.equal(finalizedBranch?.nativeTurn, "10:300");
+    assert.equal(finalizedBranch?.answer, "Branch final answer");
+
+    // 6. Cancelled streaming main-line turn that disappears leaves no orphan card
+    await session.syncConversation([
+      turn0,
+      turn2,
+      { id: "10:300", messageIndex: 4, prompt: "Deep dive", answer: "Branch final answer", sources: [] },
+      { id: "10:streaming:6", messageIndex: 6, prompt: "Aborted question", answer: "", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal((await session.ready()).document.cards.length, 4);
+    await session.syncConversation([
+      turn0,
+      turn2,
+      { id: "10:300", messageIndex: 4, prompt: "Deep dive", answer: "Branch final answer", sources: [] },
+    ], false, 10);
+    assert.equal((await session.ready()).document.cards.length, 3);
+
+    // 7. Partial (virtualized) conversation still promotes a finished streaming card
+    await session.syncConversation([
+      turn2,
+      { id: "10:400", messageIndex: 6, prompt: "Virtualized Q", answer: "Partial stream...", sources: [], streaming: true },
+    ], true, 10);
+    const partialLive = (await session.ready()).document.cards.find((card) => card.prompt === "Virtualized Q");
+    assert.equal(partialLive?.status, "streaming");
+    assert.deepEqual(partialLive?.parents, [promoted.id]);
+    await session.syncConversation([
+      turn2,
+      { id: "10:400", messageIndex: 6, prompt: "Virtualized Q", answer: "Virtualized final", sources: [] },
+    ], true, 10);
+    const partialDone = (await session.ready()).document.cards.find((card) => card.id === partialLive?.id);
+    assert.equal(partialDone?.status, "done");
+    assert.equal(partialDone?.importedTurn, "10:400");
+    assert.equal(partialDone?.answer, "Virtualized final");
+
+    // 8. Regenerating an existing response card overlays streaming in-place and clears cleanly even if text is unchanged
+    await session.syncConversation([
+      turn0,
+      { id: "10:200", messageIndex: 2, prompt: "Second question", answer: "Regenerating...", sources: [], streaming: true },
+    ], false, 10);
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === promoted.id)?.status, "streaming");
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === promoted.id)?.answer, "Regenerating...");
+    await session.syncConversation([turn0, turn2], false, 10);
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === promoted.id)?.status, "done");
+    assert.equal((await session.ready()).document.cards.find((card) => card.id === promoted.id)?.answer, "Full second answer");
+
+    // 9. Crystallize streaming turn is suppressed before and after onSent, then permanently hidden
+    const countBeforeNote = (await session.ready()).document.cards.length;
+    await session.crystallize([promoted.id], 10, async (payload, onSent) => {
+      await session.syncConversation([
+        turn0,
+        turn2,
+        { id: "10:streaming:8", messageIndex: 8, prompt: payload.prompt, answer: "Drafting note...", sources: [], streaming: true },
+      ], false, 10);
+      assert.equal((await session.ready()).document.cards.length, countBeforeNote);
+      onSent({ messageIndex: 8 });
+      await session.syncConversation([
+        turn0,
+        turn2,
+        { id: "10:500", messageIndex: 8, prompt: payload.prompt, answer: "More note...", sources: [], streaming: true },
+      ], false, 10);
+      assert.equal((await session.ready()).document.cards.length, countBeforeNote);
+      return "Final note text";
+    });
+    await session.syncConversation([
+      turn0,
+      turn2,
+      { id: "10:500", messageIndex: 8, prompt: "把上述阅读记录整理为中文笔记。用 Markdown 标题和列表梳理问题、结论、证据和待验证事项。", answer: "Final note text", sources: [] },
+    ], false, 10);
+    const finalSnap = await session.ready();
+    assert.equal(finalSnap.document.cards.length, countBeforeNote);
+    assert.ok(finalSnap.document.hiddenTurns?.includes("10:500"));
+  } finally {
+    await session.close();
+  }
+});
+
+test("parentPaper and zoteroHost support standalone PDF attachments end to end", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "zcanvas-standalone-"));
+  const previousZotero = (globalThis as { Zotero?: unknown }).Zotero;
+  const previousPathUtils = (globalThis as { PathUtils?: unknown }).PathUtils;
+  const previousIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+
+  const imagePath = join(dataDir, "annotation.png");
+  const imageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  await writeFile(imagePath, imageBytes);
+
+  const regularPaper = {
+    id: 100,
+    key: "REG00100",
+    libraryID: 1,
+    deleted: false,
+    isRegularItem: () => true,
+    isAttachment: () => false,
+    isPDFAttachment: () => false,
+  };
+  const deletedPaper = {
+    id: 101,
+    key: "DEL00101",
+    libraryID: 1,
+    deleted: true,
+    isRegularItem: () => true,
+    isAttachment: () => false,
+    isPDFAttachment: () => false,
+  };
+  const relatedItemsOnPdf: unknown[] = [];
+  let pdfSaved = 0;
+  const standalonePdf = {
+    id: 774,
+    key: "3CQL4X72",
+    libraryID: 1,
+    parentID: false,
+    parentItem: false,
+    deleted: false,
+    attachmentContentType: "application/pdf",
+    attachmentFilename: "ase26-ArmGo.pdf",
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => true,
+    getDisplayTitle: () => "ase26-ArmGo",
+    getCreators: () => { throw new Error("getCreators called on attachment"); },
+    getField: () => { throw new Error("getField called on attachment"); },
+    getNotes: () => { throw new Error("getNotes called on attachment"); },
+    getCollections: () => [11, 22],
+    addRelatedItem: (item: unknown) => { relatedItemsOnPdf.push(item); return true; },
+    saveTx: async () => { pdfSaved++; },
+  };
+  const standaloneMarkdown = {
+    id: 775,
+    key: "MD000775",
+    libraryID: 1,
+    parentID: false,
+    parentItem: false,
+    deleted: false,
+    attachmentContentType: "text/markdown",
+    attachmentFilename: "notes.md",
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => false,
+  };
+  const standaloneImage = {
+    id: 776,
+    key: "IMG00776",
+    libraryID: 1,
+    parentID: false,
+    parentItem: false,
+    deleted: false,
+    attachmentContentType: "image/png",
+    attachmentFilename: "figure.png",
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => false,
+  };
+  const standaloneNote = {
+    id: 777,
+    key: "NOTE0777",
+    libraryID: 1,
+    parentID: false,
+    parentItem: false,
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => false,
+    isPDFAttachment: () => false,
+  };
+  const childPdfOfRegular = {
+    id: 778,
+    key: "CPDF0778",
+    libraryID: 1,
+    parentID: regularPaper.id,
+    parentItem: regularPaper,
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => true,
+  };
+  const childPdfOfDeleted = {
+    id: 779,
+    key: "DPDF0779",
+    libraryID: 1,
+    parentID: deletedPaper.id,
+    parentItem: deletedPaper,
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => true,
+  };
+  const annotationOnStandalone = {
+    id: 780,
+    key: "ANNO0780",
+    libraryID: 1,
+    parentID: standalonePdf.id,
+    parentItem: standalonePdf,
+    annotationType: "image",
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => false,
+    isPDFAttachment: () => false,
+  };
+  const annotationOnChildPdf = {
+    id: 781,
+    key: "ANNO0781",
+    libraryID: 1,
+    parentID: childPdfOfRegular.id,
+    parentItem: childPdfOfRegular,
+    annotationType: "highlight",
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => false,
+    isPDFAttachment: () => false,
+  };
+
+  const createdNotes: Array<{
+    key: string;
+    libraryID: number;
+    parentID?: number;
+    collections: number[];
+    related: unknown[];
+    html: string;
+    saved: boolean;
+  }> = [];
+
+  class FakeNoteItem {
+    id = 900 + createdNotes.length;
+    key = `SAVED00${createdNotes.length + 1}`;
+    libraryID = 1;
+    parentID?: number;
+    collections: number[] = [];
+    related: unknown[] = [];
+    html = "";
+    saved = false;
+    constructor(_type: string) {
+      createdNotes.push(this);
+    }
+    setCollections(ids: number[]) {
+      this.collections = [...ids];
+    }
+    addRelatedItem(item: unknown) {
+      this.related.push(item);
+      return true;
+    }
+    setNote(html: string) {
+      this.html = html;
+    }
+    async saveTx() {
+      this.saved = true;
+    }
+  }
+
+  const byKey = new Map<string, unknown>([
+    [standalonePdf.key, standalonePdf],
+    [annotationOnStandalone.key, annotationOnStandalone],
+  ]);
+
+  (globalThis as Record<string, unknown>).PathUtils = {
+    join: (...parts: string[]) => join(...parts),
+  };
+  (globalThis as Record<string, unknown>).IOUtils = {
+    exists: async (path: string) => {
+      try { await stat(path); return true; } catch { return false; }
+    },
+    makeDirectory: async (path: string) => {
+      await mkdir(path, { recursive: true });
+    },
+    read: async (path: string) => new Uint8Array(await readFile(path)),
+    readUTF8: async (path: string) => readFile(path, "utf8"),
+    stat: async (path: string) => stat(path),
+    writeUTF8: async (path: string, content: string, options?: { tmpPath?: string }) => {
+      if (options?.tmpPath) {
+        await writeFile(options.tmpPath, content, "utf8");
+        await rename(options.tmpPath, path);
+      } else {
+        await writeFile(path, content, "utf8");
+      }
+      return Buffer.byteLength(content);
+    },
+    remove: async (path: string) => {
+      await rm(path, { force: true });
+    },
+  };
+  (globalThis as Record<string, unknown>).Zotero = {
+    DataDirectory: { dir: dataDir },
+    Item: FakeNoteItem,
+    Libraries: {
+      userLibraryID: 1,
+      get: () => ({ libraryID: 1, libraryType: "user", editable: true }),
+    },
+    Items: {
+      getByLibraryAndKeyAsync: async (_libraryID: number, key: string) => byKey.get(key) ?? false,
+    },
+    Annotations: {
+      getCacheImagePath: () => imagePath,
+    },
+    PDFWorker: {
+      renderAttachmentAnnotations: async () => {},
+    },
+  };
+
+  const win = { ZoteroPane: { loadURI: () => {} } } as unknown as _ZoteroTypes.MainWindow;
+
+  try {
+    assert.equal(parentPaper(standalonePdf as unknown as Zotero.Item), standalonePdf);
+    assert.equal(parentPaper(standaloneMarkdown as unknown as Zotero.Item), standaloneMarkdown);
+    assert.equal(parentPaper(standaloneImage as unknown as Zotero.Item), undefined);
+    assert.equal(parentPaper(standaloneNote as unknown as Zotero.Item), undefined);
+    assert.equal(parentPaper(childPdfOfRegular as unknown as Zotero.Item), regularPaper);
+    assert.equal(parentPaper(childPdfOfDeleted as unknown as Zotero.Item), undefined);
+    assert.equal(parentPaper(annotationOnStandalone as unknown as Zotero.Item), standalonePdf);
+    assert.equal(parentPaper(annotationOnChildPdf as unknown as Zotero.Item), regularPaper);
+
+    const host = zoteroHost(standalonePdf as unknown as Zotero.Item, win);
+    assert.equal(host.paper.title, "ase26-ArmGo");
+    assert.equal(host.paper.authors, "");
+    assert.equal(host.paper.year, "");
+    assert.equal(host.paper.abstract, "");
+
+    const anchor = makeAnchor(standalonePdf as unknown as Zotero.Item, 2, annotationOnStandalone.key, true);
+    const encodedImage = await host.image(anchor);
+    assert.equal(encodedImage, `data:image/png;base64,${Buffer.from(imageBytes).toString("base64")}`);
+
+    const session = new CanvasSession(host);
+    try {
+      await session.addExcerpt({ quote: "Standalone PDF quote", anchor });
+      const snapshot = await session.ready();
+      assert.equal(snapshot.document.cards.length, 1);
+      const savedFile = canvasFilePath(standalonePdf as unknown as Zotero.Item);
+      const persisted = documentSchema.parse(JSON.parse(await readFile(savedFile, "utf8")));
+      assert.equal(persisted.cards[0].quote, "Standalone PDF quote");
+
+      const noteUri = await session.crystallize([snapshot.document.cards[0].id], 10, async () => "## Summary\n- Key finding");
+      assert.equal(noteUri, "zotero://select/library/items/SAVED001");
+      assert.equal(createdNotes.length, 1);
+      assert.equal(createdNotes[0].parentID, undefined);
+      assert.deepEqual(createdNotes[0].collections, [11, 22]);
+      assert.deepEqual(createdNotes[0].related, [standalonePdf]);
+      assert.equal(createdNotes[0].saved, true);
+      assert.deepEqual(relatedItemsOnPdf, [createdNotes[0]]);
+      assert.equal(pdfSaved, 1);
+    } finally {
+      await session.close();
+    }
+  } finally {
+    (globalThis as Record<string, unknown>).Zotero = previousZotero;
+    (globalThis as Record<string, unknown>).PathUtils = previousPathUtils;
+    (globalThis as Record<string, unknown>).IOUtils = previousIOUtils;
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("readerHooks injects and cleans up toolbar buttons on already-open standalone and regular readers without duplicates", async () => {
+  const previousZotero = (globalThis as { Zotero?: unknown }).Zotero;
+
+  class FakeElement {
+    tagName: string;
+    type = "";
+    className = "";
+    textContent = "";
+    title = "";
+    parentElement: FakeElement | null = null;
+    children: FakeElement[] = [];
+    attrs = new Map<string, string>();
+    listeners = new Map<string, Array<() => void>>();
+    classList = {
+      contains: (name: string) => this.className.split(/\s+/).includes(name),
+    };
+    constructor(tagName: string) {
+      this.tagName = tagName;
+    }
+    get childElementCount() {
+      return this.children.length;
+    }
+    setAttribute(name: string, value: string) {
+      this.attrs.set(name, value);
+    }
+    hasAttribute(name: string) {
+      return this.attrs.has(name);
+    }
+    append(...nodes: FakeElement[]) {
+      for (const node of nodes) {
+        node.parentElement = this;
+        this.children.push(node);
+      }
+    }
+    remove() {
+      if (!this.parentElement) return;
+      this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+    }
+    addEventListener(type: string, handler: () => void) {
+      const handlers = this.listeners.get(type) ?? [];
+      handlers.push(handler);
+      this.listeners.set(type, handlers);
+    }
+    click() {
+      for (const handler of this.listeners.get("click") ?? []) handler();
+    }
+    querySelectorAll(selector: string): FakeElement[] {
+      const attr = selector.match(/^\[([^\]]+)\]$/)?.[1];
+      const found: FakeElement[] = [];
+      const walk = (node: FakeElement) => {
+        if (attr && node.hasAttribute(attr)) found.push(node);
+        for (const child of node.children) walk(child);
+      };
+      walk(this);
+      return found;
+    }
+  }
+
+  function makeReaderDoc() {
+    const root = new FakeElement("div");
+    const customSections = new FakeElement("div");
+    customSections.className = "custom-sections";
+    root.append(customSections);
+    return {
+      customSections,
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (selector: string) => {
+        if (selector === ".toolbar .end > .custom-sections" || selector === ".end > .custom-sections") {
+          return customSections;
+        }
+        return root.querySelectorAll(selector)[0] ?? null;
+      },
+      querySelectorAll: (selector: string) => root.querySelectorAll(selector),
+    };
+  }
+
+  const standalonePdf = {
+    id: 774,
+    key: "3CQL4X72",
+    libraryID: 1,
+    parentID: false,
+    parentItem: false,
+    deleted: false,
+    isRegularItem: () => false,
+    isAttachment: () => true,
+    isPDFAttachment: () => true,
+  };
+  const readerDoc = makeReaderDoc();
+  const existingReader = {
+    itemID: standalonePdf.id,
+    _iframeWindow: { document: readerDoc },
+    _initPromise: Promise.resolve(),
+  };
+  const handlers = new Map<string, (event: unknown) => void>();
+
+  (globalThis as Record<string, unknown>).Zotero = {
+    uiReadyPromise: Promise.resolve(),
+    Items: {
+      get: (id: number) => id === standalonePdf.id ? standalonePdf : false,
+    },
+    Reader: {
+      _readers: [existingReader],
+      registerEventListener: (type: string, handler: (event: unknown) => void) => {
+        handlers.set(type, handler);
+      },
+      unregisterEventListener: (type: string) => {
+        handlers.delete(type);
+      },
+    },
+  };
+
+  const opened: unknown[] = [];
+  const dispose = readerHooks("test-plugin", (paper) => opened.push(paper), () => true);
+  try {
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(readerDoc.customSections.children.length, 1);
+    assert.equal(readerDoc.querySelectorAll("[data-zcanvas-toolbar-button]").length, 1);
+
+    const renderToolbar = handlers.get("renderToolbar");
+    assert.ok(renderToolbar);
+    renderToolbar({
+      reader: existingReader,
+      doc: readerDoc,
+      append: (button: FakeElement) => {
+        const section = readerDoc.createElement("div");
+        section.className = "section";
+        section.append(button);
+        readerDoc.customSections.append(section);
+      },
+    });
+    assert.equal(readerDoc.querySelectorAll("[data-zcanvas-toolbar-button]").length, 1);
+
+    readerDoc.querySelectorAll("[data-zcanvas-toolbar-button]")[0].click();
+    assert.deepEqual(opened, [standalonePdf]);
+  } finally {
+    dispose();
+    (globalThis as Record<string, unknown>).Zotero = previousZotero;
+  }
+  assert.equal(readerDoc.customSections.children.length, 0);
+  assert.equal(readerDoc.querySelectorAll("[data-zcanvas-toolbar-button]").length, 0);
 });

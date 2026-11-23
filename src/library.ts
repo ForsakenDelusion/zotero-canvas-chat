@@ -5,6 +5,16 @@ import type { CanvasHost } from "./session";
 const storageTag = "_zcanvas_data";
 const storageDir = "zotero-canvas-chat";
 const fileLocks = new Map<string, Promise<unknown>>();
+const standaloneAttachmentTypes = new Set([
+  "application/pdf",
+  "text/markdown",
+  "text/x-markdown",
+  "text/html",
+  "application/xhtml+xml",
+  "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const standaloneAttachmentExtensions = /\.(?:pdf|md|markdown|html?|txt|docx)$/i;
 const encode = (bytes: Uint8Array) => {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 16384) {
@@ -29,19 +39,35 @@ export function makeAnchor(attachment: Zotero.Item, pageIndex: number, annotatio
   };
 }
 
+function standalonePaperAttachment(item?: Zotero.Item | false): boolean {
+  if (!item || item.deleted || item.parentID) return false;
+  if (typeof item.isAttachment === "function" ? !item.isAttachment() : !item.isPDFAttachment?.()) return false;
+  if (item.isPDFAttachment?.()) return true;
+  const contentType = String(item.attachmentContentType ?? "").trim().toLowerCase();
+  if (standaloneAttachmentTypes.has(contentType)) return true;
+  const filename = String((item as Zotero.Item & { attachmentFilename?: string }).attachmentFilename ?? "").trim();
+  return standaloneAttachmentExtensions.test(filename);
+}
+
 export function parentPaper(item?: Zotero.Item | false): Zotero.Item | undefined {
   if (!item || item.deleted) return;
-  const parent = item.isRegularItem() ? item : item.parentItem;
-  return parent?.isRegularItem() && !parent.deleted ? parent : undefined;
+  if (item.isRegularItem()) return item;
+  if (standalonePaperAttachment(item)) return item;
+  const parent = item.parentItem;
+  if (!parent || parent.deleted) return;
+  if (parent.isRegularItem() || standalonePaperAttachment(parent)) return parent;
+  const grandparent = parent.parentItem;
+  return grandparent && !grandparent.deleted && grandparent.isRegularItem() ? grandparent : undefined;
 }
 
 function reference(item: Zotero.Item) {
+  const regular = item.isRegularItem();
   return {
     uri: `zotero://select/${itemPath(item)}`,
     title: String(item.getDisplayTitle()).replace(/<\/?(?:i|b|sub|sup|span)[^>]*>/gi, ""),
-    authors: item.getCreators().map((creator) => [creator.firstName, creator.lastName].filter(Boolean).join(" ")).join(", "),
-    year: String(item.getField("date")).match(/\b\d{4}\b/)?.[0] ?? "",
-    abstract: String(item.getField("abstractNote")).slice(0, 20000),
+    authors: regular ? item.getCreators().map((creator) => [creator.firstName, creator.lastName].filter(Boolean).join(" ")).join(", ") : "",
+    year: regular ? String(item.getField("date")).match(/\b\d{4}\b/)?.[0] ?? "" : "",
+    abstract: regular ? String(item.getField("abstractNote")).slice(0, 20000) : "",
   };
 }
 
@@ -67,7 +93,7 @@ function withFileLock<T>(file: string, action: () => Promise<T>): Promise<T> {
 }
 
 function legacyNotes(paper: Zotero.Item) {
-  if (typeof paper.getNotes !== "function") return [];
+  if (!paper.isRegularItem() || typeof paper.getNotes !== "function") return [];
   return Zotero.Items.get(paper.getNotes()).filter((note) => note.hasTag(storageTag) && !note.deleted);
 }
 
@@ -217,7 +243,7 @@ export function zoteroHost(paper: Zotero.Item, win: _ZoteroTypes.MainWindow): Ca
     ...storage(paper),
     async image(anchor) {
       const attachment = await lookup(anchor.uri);
-      if (!attachment || attachment.parentID !== paper.id || !attachment.isPDFAttachment()) return null;
+      if (!attachment || (attachment.id !== paper.id && attachment.parentID !== paper.id) || !attachment.isPDFAttachment()) return null;
       const key = new URL(anchor.uri).searchParams.get("annotation");
       if (!key) return null;
       const annotation = await Zotero.Items.getByLibraryAndKeyAsync(attachment.libraryID, key);
@@ -247,9 +273,19 @@ export function zoteroHost(paper: Zotero.Item, win: _ZoteroTypes.MainWindow): Ca
       if (!library || !library.editable) throw new Error("当前文库为只读。");
       const links = sources.map(({ label, uri }) => `<li><a href="${escape(uri)}">${escape(label)}</a></li>`).join("");
       const note = Object.assign(new Zotero.Item("note"), { libraryID: paper.libraryID });
-      note.parentID = paper.id;
+      if (paper.isRegularItem()) {
+        note.parentID = paper.id;
+      } else {
+        const collections = typeof paper.getCollections === "function" ? paper.getCollections() : [];
+        if (collections.length && typeof note.setCollections === "function") note.setCollections(collections);
+        if (typeof note.addRelatedItem === "function") note.addRelatedItem(paper);
+      }
       note.setNote(`<h1>Canvas Chat · 阅读笔记</h1>${noteBody(text)}${links ? `<h2>来源</h2><ul>${links}</ul>` : ""}`);
       await note.saveTx();
+      if (!paper.isRegularItem() && typeof paper.addRelatedItem === "function" && typeof paper.saveTx === "function") {
+        paper.addRelatedItem(note);
+        await paper.saveTx().catch(() => undefined);
+      }
       return `zotero://select/${itemPath(note)}`;
     },
   };

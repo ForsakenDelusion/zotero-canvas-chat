@@ -99,13 +99,12 @@ h1, h2, p { margin: 0; }
   border-radius: 10px;
   box-shadow: var(--shadow);
   overflow: clip;
-  padding: 14px 15px 10px;
+  padding: 12px 15px 7px;
   user-select: none;
 }
 .react-flow__node.selected .card { border-color: color-mix(in srgb, var(--accent) 68%, var(--line)); }
 .card-head { display: flex; align-items: center; gap: 6px; min-height: 27px; }
 .card-grip { display: inline-flex; flex-shrink: 0; color: var(--muted); }
-.card-kind { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .card-head-actions { margin-inline-start: auto; display: flex; align-items: center; gap: 4px; }
 .card-expand { width: 26px; height: 26px; flex-basis: 26px; color: var(--muted); }
 .page-chip { font-size: 11px; padding: 5px 6px; color: var(--muted); }
@@ -126,13 +125,14 @@ h1, h2, p { margin: 0; }
 .markdown-link { text-decoration: underline; text-underline-offset: 3px; color: var(--accent); }
 .markdown .katex-display { margin: 6px 0; overflow: auto hidden; }
 .card-foot { margin-top: 10px; padding-top: 5px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 3px; }
+.card-foot-ask { justify-content: center; }
 .card-foot button { color: var(--muted); font-size: 12px; padding: 5px 7px; gap: 5px; white-space: nowrap; }
+.card-foot .card-ask-button { min-width: 44px; height: 26px; padding: 0; justify-content: center; border-radius: 6px; }
 .card-foot button:hover, .card-foot button:focus-visible { color: var(--ink); }
 .react-flow__handle { width: 7px; height: 7px; border: 1px solid var(--paper); background: var(--edge); }
 .react-flow__handle-left { left: -4px; }
 .react-flow__handle-right { right: -4px; }
-.stream-label { display: flex; align-items: center; gap: 6px; color: var(--accent); font-size: 11px; }
-.stream-label i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.2s ease-in-out infinite; }
+.stream-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-inline-end: 2px; animation: pulse 1.2s ease-in-out infinite; }
 .card-error { color: var(--error); font-size: 12px; line-height: 1.5; }
 .muted { color: var(--muted); }
 .empty, .boot { display: flex; align-items: center; flex-direction: column; gap: 13px; text-align: center; }
@@ -189,7 +189,7 @@ textarea { resize: vertical; max-height: 40vh; }
 .toast-error { color: var(--error); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 50% { opacity: .45; } }
+@keyframes pulse { 50% { opacity: .25; } }
 @media (max-width: 820px) {
   .board-top, .board-bottom { left: 10px; right: 10px; flex-wrap: wrap; }
   .tool-group.selection-tools { margin-left: 0; }

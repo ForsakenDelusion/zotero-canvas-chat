@@ -2,6 +2,12 @@ import { parentPaper } from "./library";
 import { readNativePrompt } from "../shared/question";
 
 const standaloneChat = ".llm-standalone-content #llm-main";
+const streamingIndicator = ".llm-bubble.streaming, .llm-typing, .llm-rose-loader";
+
+function isCancelVisible(chat: Element) {
+  const cancel = chat.querySelector<HTMLElement>("#llm-cancel");
+  return Boolean(cancel && !cancel.hidden && cancel.style.display !== "none");
+}
 
 function markdown(node: Node, citation?: (mark: Element) => string): string {
   if (node.nodeType === 3) return node.textContent || "";
@@ -41,7 +47,8 @@ function markdown(node: Node, citation?: (mark: Element) => string): string {
 }
 
 function answerBlocks(message: Element) {
-  return [...message.querySelectorAll(".llm-assistant-answer, .llm-agent-inline-text")] as Element[];
+  return ([...message.querySelectorAll(".llm-assistant-answer, .llm-agent-inline-text")] as HTMLElement[])
+    .filter((block) => !block.hidden);
 }
 
 export function answerMarkdown(blocks: Element[], citation?: (mark: Element) => string) {
@@ -61,7 +68,7 @@ export function answerForTurn(container: Element, itemID: number, turnID: string
   const messages = [...current.chat.querySelectorAll('#llm-chat-box > [data-message-role="assistant"]')] as HTMLElement[];
   const message = messages
     .find((node) => `${current.key}:${assistantTimestamp(node, current.key)}` === turnID &&
-      !node.querySelector(".llm-bubble.streaming, .llm-typing"));
+      !node.querySelector(streamingIndicator));
   return message ? answerBlocks(message) : [];
 }
 
@@ -99,7 +106,7 @@ export function readTurnOutcome(
   chat: HTMLElement, previousMax: number, expectedUserIndex?: number,
 ): { state: "pending" } | { state: "done"; answer: string; stopped: boolean } {
   const box = chat.querySelector("#llm-chat-box");
-  if (!box || chat.querySelector(".llm-bubble.streaming, .llm-typing") ||
+  if (!box || chat.querySelector(streamingIndicator) || isCancelVisible(chat) ||
       box.querySelector('[data-message-role="user"] #llm-input')) {
     return { state: "pending" };
   }
@@ -116,7 +123,7 @@ export function readTurnOutcome(
     node.dataset.messageRole === "assistant" &&
     !node.classList.contains("llm-compact-marker-wrapper") &&
     Number(node.dataset.messageIndex) === userIndex + 1 &&
-    !node.querySelector(".llm-bubble.streaming, .llm-typing"));
+    !node.querySelector(streamingIndicator));
   if (!assistant) return { state: "pending" };
   const answer = answerMarkdown(answerBlocks(assistant));
   if (!answer) return { state: "pending" };
@@ -157,9 +164,11 @@ export function observeConversation(
   const doc = container.ownerDocument;
   const win = doc.defaultView!;
   let timer: number | undefined;
+  let lastSync = 0;
   let fingerprint: string | undefined;
   function sync() {
     timer = undefined;
+    lastSync = Date.now();
     const current = conversationAt(container, itemID);
     if (!current) {
       if (fingerprint !== "") update(0, [], false);
@@ -173,40 +182,88 @@ export function observeConversation(
     const firstMessage = messages.find((message) => message.dataset.messageIndex !== undefined);
     const renderedUsers = messages.filter((message) => message.dataset.messageRole === "user").length;
     const expectedUsers = chat.querySelectorAll(".llm-turn-navigator-marker").length;
+    const editingUser = !!box?.querySelector('[data-message-role="user"] #llm-input');
+    const cancelVisible = isCancelVisible(chat);
+    const lastAssistant = messages.findLast((message) =>
+      message.dataset.messageRole === "assistant" && !message.classList.contains("llm-compact-marker-wrapper"));
     const partial = !box || Number(firstMessage?.dataset.messageIndex) > 0 ||
-      expectedUsers > renderedUsers ||
-      !!box.querySelector('[data-message-role="user"] #llm-input, .llm-bubble.streaming, .llm-typing');
+      expectedUsers > renderedUsers || editingUser;
     let user: Element | undefined;
     let userIndex = -1;
     let userQuotes: string[] = [];
     let userInlineQuestions: string[] = [];
+    let userPaired = true;
     for (const message of messages) {
       if (message.dataset.messageRole === "user") {
+        const parsedIndex = Number(message.dataset.messageIndex);
+        if (message.querySelector("#llm-input") || !Number.isSafeInteger(parsedIndex) || parsedIndex < 0) {
+          user = undefined;
+          userIndex = -1;
+          userQuotes = [];
+          userInlineQuestions = [];
+          userPaired = true;
+          continue;
+        }
         user = message.querySelector(".llm-bubble.user") ?? undefined;
-        userIndex = Number(message.dataset.messageIndex);
+        userIndex = parsedIndex;
         const extracted = readModelQuotes(message);
         userQuotes = extracted.quotes;
         userInlineQuestions = extracted.inlineQuestions;
+        userPaired = false;
         continue;
       }
-      if (message.dataset.messageRole !== "assistant" || (!user && !userInlineQuestions.length) ||
-          message.classList.contains("llm-compact-marker-wrapper") ||
-          Number(message.dataset.messageIndex) !== userIndex + 1 ||
-          message.querySelector(".llm-bubble.streaming, .llm-typing")) continue;
+      if (message.dataset.messageRole !== "assistant" || (!user && !userInlineQuestions.length)) continue;
+      if (message.classList.contains("llm-compact-marker-wrapper")) {
+        if (Number(message.dataset.messageIndex) === userIndex + 1) userPaired = true;
+        continue;
+      }
+      if (Number(message.dataset.messageIndex) !== userIndex + 1) continue;
+      userPaired = true;
+      const streaming = Boolean(message.querySelector(streamingIndicator)) ||
+        (message === lastAssistant && cancelVisible && !message.querySelector(".llm-message-action-copy"));
       const timestamp = assistantTimestamp(message, key);
-      if (!timestamp) continue;
       const blocks = answerBlocks(message);
       const answer = answerMarkdown(blocks);
-      if (!answer) continue;
-      const stopped = /^\[(?:Cancelled|Canceled|Aborted|已取消)\]$/i.test(answer);
       const rawPrompt = (user?.textContent || "").trim() || userInlineQuestions.join("\n\n");
       const { question, branchID } = readNativePrompt(rawPrompt);
+      if (streaming) {
+        turns.push({
+          timestamp: timestamp ?? 0,
+          messageIndex: userIndex,
+          stopped: false,
+          streaming: true,
+          branchID,
+          quotedTexts: userQuotes.length ? userQuotes : undefined,
+          question: question.slice(0, 20000),
+          answer,
+          sources: blocks.flatMap(pdfSources).slice(0, 30),
+        });
+        continue;
+      }
+      if (!timestamp || !answer) continue;
+      const stopped = /^\[(?:Cancelled|Canceled|Aborted|已取消)\]$/i.test(answer);
       turns.push({
-        timestamp, messageIndex: userIndex, stopped, branchID,
+        timestamp, messageIndex: userIndex, stopped, streaming: false, branchID,
         quotedTexts: userQuotes.length ? userQuotes : undefined,
         question: question.slice(0, 20000),
         answer: stopped ? "" : answer,
         sources: blocks.flatMap(pdfSources).slice(0, 30),
+      });
+    }
+    if (!userPaired && !editingUser && cancelVisible && (user || userInlineQuestions.length) &&
+        Number.isSafeInteger(userIndex) && userIndex >= 0) {
+      const rawPrompt = (user?.textContent || "").trim() || userInlineQuestions.join("\n\n");
+      const { question, branchID } = readNativePrompt(rawPrompt);
+      turns.push({
+        timestamp: 0,
+        messageIndex: userIndex,
+        stopped: false,
+        streaming: true,
+        branchID,
+        quotedTexts: userQuotes.length ? userQuotes : undefined,
+        question: question.slice(0, 20000),
+        answer: "",
+        sources: [],
       });
     }
     const next = JSON.stringify([key, partial, turns]);
@@ -219,18 +276,19 @@ export function observeConversation(
   const observer = new win.MutationObserver((mutations) => {
     if (timer !== undefined || !mutations.some(({ type, target, addedNodes, removedNodes }) => {
       const element = target.nodeType === 1 ? target as Element : target.parentElement;
-      return element?.matches("#llm-main") || !!element?.closest("#llm-chat-box") ||
+      return element?.matches("#llm-main") || !!element?.closest("#llm-chat-box, #llm-status") ||
         (type === "childList" && !!element?.closest(".llm-turn-navigator-list")) ||
         [...addedNodes, ...removedNodes].some((node) => node?.nodeType === 1 &&
           ((node as Element).matches("#llm-main") || (node as Element).querySelector("#llm-main")));
     })) return;
-    timer = win.setTimeout(sync, 120);
+    const delay = Math.max(20, 160 - (Date.now() - lastSync));
+    timer = win.setTimeout(sync, delay);
   });
   observer.observe(doc.documentElement, {
     childList: true, subtree: true, characterData: true, attributes: true,
     attributeFilter: [
       "data-item-id", "data-base-paper-item-id", "data-conversation-kind",
-      "data-message-index", "data-message-timestamp", "data-assistant-timestamp", "class",
+      "data-message-index", "data-message-timestamp", "data-assistant-timestamp", "class", "hidden",
     ],
   });
   sync();
@@ -249,4 +307,5 @@ type ReadTurn = {
   answer: string;
   sources: ReturnType<typeof pdfSources>;
   stopped: boolean;
+  streaming: boolean;
 };

@@ -372,7 +372,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       let attempts = 0;
       win.clearInterval(sendWatch);
       sendWatch = win.setInterval(() => {
-        if (!target.input.value || target.chat.querySelector(".llm-bubble.streaming")) cleanup(true);
+        if (!target.input.value || target.chat.querySelector(".llm-bubble.streaming, .llm-typing, .llm-rose-loader")) cleanup(true);
         else if (++attempts >= 40) win.clearInterval(sendWatch);
       }, 75);
     }
@@ -494,7 +494,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       throw new Error("请先在 LLM for Zotero 中打开这篇文献的论文对话。");
     }
     if (target.input.value.trim()) throw new Error("论文对话中有未发送的草稿，请先处理草稿。");
-    if (target.chat.querySelector(".llm-bubble.streaming, .llm-typing")) {
+    if (target.chat.querySelector(".llm-bubble.streaming, .llm-typing, .llm-rose-loader")) {
       throw new Error("请等论文对话中的当前回答生成完毕。");
     }
     const isActive = () => iframe.isConnected && conversationAt(container, itemID)?.key === target.key;
