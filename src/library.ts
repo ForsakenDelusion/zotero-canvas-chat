@@ -118,7 +118,7 @@ async function removeLegacyNotes(paper: Zotero.Item, notes = legacyNotes(paper))
 }
 
 async function writeCanvasFile(file: string, document: CanvasDocument) {
-  if (!document.cards.length && !document.hiddenTurns?.length) {
+  if (!document.cards.length && !document.hiddenTurns?.length && !document.runtimeConversations) {
     if (await IOUtils.exists(file)) await IOUtils.remove(file, { ignoreAbsent: true });
     return;
   }

@@ -160,6 +160,7 @@ function readModelQuotes(message: HTMLElement) {
 
 export function observeConversation(
   container: Element, itemID: number, update: (key: number, turns: ReadTurn[], partial: boolean) => void,
+  canSync: (current: ReturnType<typeof conversationAt>) => boolean,
 ) {
   const doc = container.ownerDocument;
   const win = doc.defaultView!;
@@ -170,6 +171,10 @@ export function observeConversation(
     timer = undefined;
     lastSync = Date.now();
     const current = conversationAt(container, itemID);
+    if (!canSync(current)) {
+      timer = win.setTimeout(sync, 80);
+      return;
+    }
     if (!current) {
       if (fingerprint !== "") update(0, [], false);
       fingerprint = "";
@@ -288,6 +293,7 @@ export function observeConversation(
     childList: true, subtree: true, characterData: true, attributes: true,
     attributeFilter: [
       "data-item-id", "data-base-paper-item-id", "data-conversation-kind",
+      "data-conversation-system", "data-switching",
       "data-message-index", "data-message-timestamp", "data-assistant-timestamp", "class", "hidden",
     ],
   });

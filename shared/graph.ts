@@ -21,25 +21,32 @@ export function ancestors(document: CanvasDocument, ids: string[]): Card[] {
 
 export function conversationCards(
   cards: Card[], turns: ReadonlySet<string>, conversationKey = 0, branches: ReadonlySet<string> = new Set(),
+  runtimeConversations?: CanvasDocument["runtimeConversations"],
 ): Card[] {
-  const activeBranches = new Set(cards.filter((card) =>
-    card.nativeBranch === conversationKey && (
-      branches.has(card.id) ||
-      (card.nativeTurn !== undefined && turns.has(card.nativeTurn)) ||
-      card.status === "streaming"
-    )).map((card) => card.id));
+  const canvasKey = runtimeConversations?.[conversationKey] ?? conversationKey;
+  const related = (key: number) =>
+    key !== conversationKey && (runtimeConversations?.[key] ?? key) === canvasKey;
+  const retainedTurn = (turn: string) => related(Number(turn.split(":", 1)[0]));
+  const activeBranches = new Set(cards.filter((card) => {
+    if (card.nativeBranch !== conversationKey) {
+      return card.nativeTurn && card.status !== "streaming" && retainedTurn(card.nativeTurn);
+    }
+    return branches.has(card.id) || (card.nativeTurn && turns.has(card.nativeTurn)) || card.status === "streaming";
+  }).map((card) => card.id));
   const sources = new Set(activeBranches);
   for (let index = cards.length - 1; index >= 0; index--) {
     const card = cards[index];
     if (sources.has(card.id)) for (const parent of card.parents) sources.add(parent);
   }
   const visible = new Set<string>();
-  const turnPrefix = `${conversationKey}:`;
   return cards.filter((card) => {
-    if ((card.nativeBranch === conversationKey && !activeBranches.has(card.id)) ||
-        (card.importedTurn && !turns.has(card.importedTurn) &&
-          (card.importedTurn.startsWith(turnPrefix) || !sources.has(card.id))) ||
-        !card.parents.every((parent) => visible.has(parent))) return false;
+    const { nativeBranch, importedTurn } = card;
+    if (nativeBranch && (nativeBranch === conversationKey || related(nativeBranch)) && !activeBranches.has(card.id)) return false;
+    if (importedTurn && !turns.has(importedTurn)) {
+      const retained = card.status !== "streaming" && retainedTurn(importedTurn);
+      if (importedTurn.startsWith(`${conversationKey}:`) || (!retained && !sources.has(card.id))) return false;
+    }
+    if (!card.parents.every((parent) => visible.has(parent))) return false;
     visible.add(card.id);
     return true;
   });
