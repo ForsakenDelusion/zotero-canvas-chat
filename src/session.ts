@@ -95,6 +95,20 @@ export class CanvasSession {
     return this.snapshot();
   }
 
+  linkRuntimeConversation(from: number, to: number) {
+    return this.serial(() => {
+      if (this.disposed || from === to) return;
+      const links = this.document.runtimeConversations ?? {};
+      const canvasKey = links[from] ?? from;
+      if ((links[to] ?? to) === canvasKey) return;
+      // The host can reuse an empty draft, including one we previously linked.
+      this.document = { ...this.document, runtimeConversations: { ...links, [to]: canvasKey } };
+      this.saved = false;
+      this.emit();
+      this.scheduleSave();
+    });
+  }
+
   private emit(event: Event = { type: "snapshot", snapshot: this.snapshot() }) {
     for (const listener of this.listeners) listener(event);
   }

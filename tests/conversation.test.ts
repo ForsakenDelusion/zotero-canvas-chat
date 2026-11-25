@@ -9,7 +9,59 @@ import { nativeBranchPrompt, readNativePrompt } from "../shared/question.ts";
 import { documentSchema, type CanvasDocument, type Reference } from "../shared/schema.ts";
 import { canvasFilePath, makeAnchor, migrateLegacyNotes, parentPaper, zoteroHost } from "../src/library.ts";
 import { readerHooks } from "../src/reader.ts";
-import { CanvasSession, type NativeBranchSubmission } from "../src/session.ts";
+import { CanvasSession, type CanvasHost, type NativeBranchSubmission } from "../src/session.ts";
+
+test("a runtime switch keeps the source canvas and attaches the answer to its original card", async () => {
+  let saved: CanvasDocument | null = null;
+  const paper: Reference = {
+    uri: "zotero://select/library/items/ABCDEFGH",
+    title: "Runtime switch fixture", authors: "", year: "", abstract: "",
+  };
+  const host: CanvasHost = {
+    paper, load: async () => saved, save: async (document) => { saved = documentSchema.parse(document); },
+    image: async () => null, open: () => {}, search: async () => [], reference: async () => paper, note: async () => "",
+  };
+  const session = new CanvasSession(host);
+  const source = { id: "10:100", messageIndex: 0, prompt: "Source", answer: "Original context", sources: [] };
+  const latest = { id: "10:200", messageIndex: 2, prompt: "Latest", answer: "Another card", sources: [] };
+  const unrelated = { id: "30:300", messageIndex: 0, prompt: "Separate chat", answer: "Other context", sources: [] };
+  const followUp = { id: "20:400", messageIndex: 0, prompt: "Follow-up", answer: "Answer in new runtime", sources: [] };
+  const sourceID = `llm:${source.id}`;
+  const originalCards = [sourceID, `llm:${latest.id}`];
+  let branchID: string;
+  const cardsFor = (document: CanvasDocument, key: number, turns: string[]) =>
+    conversationCards(document.cards, new Set(turns), key, undefined, document.runtimeConversations);
+  try {
+    await session.syncConversation([source, latest]);
+    await session.syncConversation([unrelated]);
+    await session.linkRuntimeConversation(10, 20);
+    const switched = (await session.ready()).document;
+    assert.deepEqual(cardsFor(switched, 20, []).map((card) => card.id), originalCards);
+    branchID = await session.submitNativeBranch([sourceID], followUp.prompt, "Selected text", 20, async (payload) => {
+      assert.match(payload.markdown, /Selected text[\s\S]*Original context/);
+      return { messageIndex: followUp.messageIndex };
+    }, () => {});
+    await session.syncConversation([followUp]);
+    await session.linkRuntimeConversation(20, 40);
+    await session.command({ type: "save" });
+  } finally {
+    await session.close();
+  }
+
+  const reloaded = new CanvasSession(host);
+  try {
+    const { document } = await reloaded.ready();
+    const expectedCards = [...originalCards, branchID];
+    assert.deepEqual(cardsFor(document, 10, [source.id, latest.id]).map((card) => card.id), expectedCards);
+    assert.deepEqual(cardsFor(document, 40, []).map((card) => card.id), expectedCards);
+    assert.deepEqual(cardsFor(document, 30, [unrelated.id]).map((card) => card.id), [`llm:${unrelated.id}`]);
+    const branch = cardsFor(document, 20, [followUp.id]).find((card) => card.id === branchID);
+    assert.deepEqual(branch?.parents, [sourceID]);
+    assert.equal(branch?.answer, followUp.answer);
+  } finally {
+    await reloaded.close();
+  }
+});
 
 test("conversation backfill preserves existing cards and updates them across layout undo", async () => {
   const paper: Reference = {

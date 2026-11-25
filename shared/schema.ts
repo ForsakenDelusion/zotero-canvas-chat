@@ -43,6 +43,7 @@ export const documentSchema = z.object({
   cards: z.array(cardSchema).max(1000),
   viewport: viewportSchema,
   hiddenTurns: z.array(id).max(1000).optional(),
+  runtimeConversations: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive()).optional(),
 }).superRefine(({ cards }, context) => {
   const seen = new Set<string>();
   for (const card of cards) {
@@ -59,6 +60,7 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
   z.object({
     type: z.literal("openComposer"), request: id, parents: z.array(id).max(50),
+    continueMain: z.boolean().optional(),
     quote: z.string().max(50000).optional(), source: z.string().max(500).optional(), draft: z.string().max(20000),
     anchor: z.object({ left: z.number(), top: z.number(), bottom: z.number() }).optional(),
   }),
@@ -107,6 +109,7 @@ export type Snapshot = {
   document: CanvasDocument;
   paper: Reference;
   conversationKey?: number;
+  canvasConversationKey?: number;
   undo: boolean;
   redo: boolean;
   saved: boolean;

@@ -41,9 +41,11 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   const viewport = useViewport();
   const noticeTimer = useRef<number | undefined>(undefined);
   const firstFrame = useRef(true);
-  const shownConversation = useRef(initial.conversationKey);
+  const canvasConversationKey = snapshot.canvasConversationKey ?? snapshot.conversationKey;
+  const shownConversation = useRef(canvasConversationKey);
   const cards = snapshot.document.cards;
-  const lastMain = cards.findLast((card) => Boolean(card.importedTurn));
+  const lastMain = cards.findLast((card) => card.importedTurn &&
+    (!snapshot.conversationKey || card.importedTurn.startsWith(`${snapshot.conversationKey}:`)));
   const lastTurn = cards.findLast((card) => card.importedTurn && card.status === "done") ?? lastMain;
   const hasCards = cards.length > 0;
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -104,9 +106,9 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   }, []);
 
   useEffect(() => {
-    const changedConversation = shownConversation.current !== snapshot.conversationKey;
+    const changedConversation = shownConversation.current !== canvasConversationKey;
     if (changedConversation) {
-      shownConversation.current = snapshot.conversationKey;
+      shownConversation.current = canvasConversationKey;
       firstFrame.current = true;
       setSelected([]);
       setFocusId("");
@@ -143,7 +145,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     } else if (defaultView || !visible.length) {
       void flow.fitView({ padding: 0.3, maxZoom: 1 });
     }
-  }, [canvasVisible, nodesInitialized, flow, focusId, focusMeasured, snapshot.conversationKey, lastTurn?.id]);
+  }, [canvasVisible, nodesInitialized, flow, focusId, focusMeasured, canvasConversationKey, lastTurn?.id]);
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
@@ -160,8 +162,7 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
   const openQuestion = useCallback((parents: string[], anchor: () => DOMRect | undefined, quote?: string, trigger?: HTMLButtonElement) => {
     const conversationKey = snapshot.conversationKey;
     const continuesMain = Boolean(conversationKey && !quote?.trim() && parents.length === 1 && lastMain && parents[0] === lastMain.id);
-    const composerParents = continuesMain ? [] : parents;
-    const draftKey = JSON.stringify([conversationKey, [...composerParents].sort(), quote]);
+    const draftKey = JSON.stringify([canvasConversationKey, [...parents].sort(), quote]);
     const request = String(++questionSequence.current);
     const source = parents.length === 1 ? cards.find((card) => card.id === parents[0])?.title :
       parents.length ? `${parents.length} 张卡片` : undefined;
@@ -169,14 +170,14 @@ export function Workspace({ bridge, initial }: { bridge: Bridge; initial: Snapsh
     questionKeys.current.set(request, draftKey);
     const bounds = anchor();
     void bridge.call({
-      type: "openComposer", request, parents: composerParents, quote, source, draft: drafts.current.get(draftKey) ?? "",
+      type: "openComposer", request, parents, continueMain: continuesMain, quote, source, draft: drafts.current.get(draftKey) ?? "",
       anchor: bounds && { left: bounds.left, top: bounds.top, bottom: bounds.bottom },
     }).catch((error) => {
       questionKeys.current.delete(request);
       setQuestion((current) => current?.request === request ? undefined : current);
       report(errorMessage(error), true);
     });
-  }, [bridge, cards, lastMain, report, snapshot.conversationKey]);
+  }, [bridge, cards, lastMain, report, canvasConversationKey, snapshot.conversationKey]);
 
   useEffect(() => {
     const request = question?.request;

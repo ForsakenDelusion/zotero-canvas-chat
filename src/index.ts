@@ -70,9 +70,11 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   if (themeRoot && themeRoot !== root) themeObserver.observe(themeRoot, themeAttributes);
   darkMode?.addEventListener("change", sendTheme);
   const project = (snapshot: Snapshot): Snapshot => {
-    const cards = conversationCards(snapshot.document.cards, turnIDs, conversationKey, new Set(branchTurns.keys()));
+    const { runtimeConversations } = snapshot.document;
+    const canvasConversationKey = runtimeConversations?.[conversationKey] ?? conversationKey;
+    const cards = conversationCards(snapshot.document.cards, turnIDs, conversationKey, new Set(branchTurns.keys()), runtimeConversations);
     visibleIDs = new Set(cards.map((card) => card.id));
-    return { ...snapshot, conversationKey, document: { ...snapshot.document, cards } };
+    return { ...snapshot, conversationKey, canvasConversationKey, document: { ...snapshot.document, cards } };
   };
   const unsubscribe = session.subscribe((event) => {
     if (port && event.type === "snapshot") port.postMessage({ event: { ...event, snapshot: project(event.snapshot) } });
@@ -82,6 +84,10 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   });
   const composer = nativeComposer(container, iframe, paper.id, session, (request, draft) => {
     if (connected) port?.postMessage({ event: { type: "composerClosed", request, draft } });
+  }, (from, to) => {
+    syncing = syncing.then(async () => {
+      if (connected) await session.linkRuntimeConversation(from, to);
+    }).catch((error) => Zotero.logError(error));
   });
   const citations = nativeCitations(container, iframe, paper.id, (event) => {
     if (connected) port?.postMessage({ event });
@@ -94,32 +100,34 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
       stopped: turn.stopped, streaming: turn.streaming || undefined,
       branchID: turn.branchID, quotedTexts: turn.quotedTexts,
     }));
-    if (conversationKey !== key) citations.reset();
-    const previousKey = conversationKey;
-    const previousTurns = [...turnIDs];
-    const previousBranches = [...branchTurns.entries()];
-    if (!partial || conversationKey !== key) {
-      turnIDs = new Set();
-      branchTurns = new Map();
-    }
-    for (const turn of entries) {
-      turnIDs.add(turn.id);
-      if (turn.branchID) branchTurns.set(turn.branchID, turn.id);
-    }
-    conversationKey = key;
-    const viewChanged = previousKey !== key ||
-      previousTurns.length !== turnIDs.size ||
-      previousTurns.some((id) => !turnIDs.has(id)) ||
-      previousBranches.length !== branchTurns.size ||
-      previousBranches.some(([id, turn]) => branchTurns.get(id) !== turn);
-    syncing = session.syncConversation(entries, partial, key).then(async (outcome) => {
+    syncing = syncing.then(async () => {
+      if (!connected) return;
+      if (conversationKey !== key) citations.reset();
+      const previousKey = conversationKey;
+      const previousTurns = [...turnIDs];
+      const previousBranches = [...branchTurns.entries()];
+      if (!partial || conversationKey !== key) {
+        turnIDs = new Set();
+        branchTurns = new Map();
+      }
+      for (const turn of entries) {
+        turnIDs.add(turn.id);
+        if (turn.branchID) branchTurns.set(turn.branchID, turn.id);
+      }
+      conversationKey = key;
+      const viewChanged = previousKey !== key ||
+        previousTurns.length !== turnIDs.size ||
+        previousTurns.some((id) => !turnIDs.has(id)) ||
+        previousBranches.length !== branchTurns.size ||
+        previousBranches.some(([id, turn]) => branchTurns.get(id) !== turn);
+      const outcome = await session.syncConversation(entries, partial, key);
       if (!port || !connected) return;
       if (viewChanged && outcome !== "snapshot") {
         const snapshot = project(await session.ready());
         if (connected) port?.postMessage({ event: { type: "snapshot", snapshot } });
       }
     }).catch((error) => Zotero.logError(error));
-  });
+  }, composer.canSync);
   const connect = () => {
     const target = iframe.contentWindow;
     const document = target?.document;
@@ -196,7 +204,7 @@ function mountPaper(itemID: number, container: Element, onDetach: () => void) {
   const unmount = () => {
     if (!mounts.delete(detach)) return;
     connected = false;
-    composer.close();
+    composer.dispose();
     citations.reset();
     win.clearTimeout(timer);
     stopObserving();

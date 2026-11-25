@@ -5,6 +5,7 @@ import type { CanvasSession, NativeBranchSubmission } from "./session";
 
 type Open = Extract<Command, { type: "openComposer" }>;
 type HostWindow = Window & typeof globalThis;
+type Conversation = ReturnType<typeof conversationAt>;
 const namespace = "http://www.w3.org/1999/xhtml";
 const menus = [
   ["#llm-runtime-menu", "#llm-runtime-mode-toggle"],
@@ -12,7 +13,10 @@ const menus = [
   ["#llm-reasoning-menu", "#llm-reasoning-toggle"],
   ["#llm-slash-menu", "#llm-upload-file"],
 ] as const;
-const historyNavigation = ".llm-standalone-sidebar .llm-standalone-conv-item, .llm-standalone-nav-new-chat, .llm-standalone-search-item";
+const historyNavigation = [
+  ".llm-standalone-sidebar .llm-standalone-conv-item", ".llm-standalone-nav-new-chat", ".llm-standalone-search-item",
+  "#llm-history-new", "#llm-history-new-menu button", "#llm-history-menu .llm-history-menu-row-main",
+].join(", ");
 
 const styles = `
   .llm-standalone-content-wrapper { overflow: visible; }
@@ -61,10 +65,28 @@ function position(element: HTMLElement, left: number, top: number, width: number
 }
 
 export function nativeComposer(container: Element, iframe: HTMLIFrameElement, itemID: number, session: CanvasSession,
-  closed: (request: string, draft: string) => void) {
+  closed: (request: string, draft: string) => void, runtimeChanged: (from: number, to: number) => void) {
   const doc = container.ownerDocument;
   const win = doc.defaultView as HostWindow;
   let active: { close(): void; request: string } | undefined;
+  let runtimeSwitch: { from: number; system: string; timer: number; resume: (key?: number) => void } | undefined;
+
+  function clearRuntimeSwitch() {
+    if (runtimeSwitch) win.clearTimeout(runtimeSwitch.timer);
+    runtimeSwitch = undefined;
+  }
+
+  function canSync(next: Conversation) {
+    const switching = runtimeSwitch;
+    if (!switching) return true;
+    if (next?.chat.dataset.conversationSystem !== switching.system) return false;
+    const toggle = next.chat.querySelector<HTMLElement>("#llm-runtime-mode-toggle");
+    if (!toggle || toggle.dataset.switching === "true") return false;
+    clearRuntimeSwitch();
+    if (next.key !== switching.from) runtimeChanged(switching.from, next.key);
+    switching.resume(next.key);
+    return true;
+  }
 
   const locate = () => {
     const current = conversationAt(container, itemID);
@@ -87,18 +109,23 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       .filter((index) => Number.isSafeInteger(index) && index >= 0);
   }
 
+  function attachFiles(target: Target, files: File[]) {
+    const transfer = new win.DataTransfer();
+    for (const file of files) transfer.items.add(file);
+    target.section.dispatchEvent(new win.DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }
+
   async function includeImages(target: Target, images: string[], isActive: () => boolean) {
     if (!images.length) return;
     const count = () => target.section.querySelectorAll("#llm-image-preview-strip [data-image-context-index]").length;
     const expected = count() + images.length;
-    const files = new win.DataTransfer();
-    for (const [index, image] of images.entries()) {
+    const files = images.map((image, index) => {
       const match = /^data:(image\/[\w.+-]+);base64,([\s\S]+)$/.exec(image);
       if (!match) throw new Error("无法读取来源卡片的截图。");
       const bytes = Uint8Array.from(win.atob(match[2]), (character) => character.charCodeAt(0));
-      files.items.add(new win.File([bytes], `canvas-${index + 1}.${match[1].split("/")[1]}`, { type: match[1] }));
-    }
-    target.input.dispatchEvent(new win.ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: files }));
+      return new win.File([bytes], `canvas-${index + 1}.${match[1].split("/")[1]}`, { type: match[1] });
+    });
+    attachFiles(target, files);
     const deadline = Date.now() + 6000;
     while (isActive() && count() < expected && Date.now() < deadline) await Zotero.Promise.delay(50);
     if (count() < expected) throw new Error("原版输入栏未能添加来源截图，请检查当前模型是否支持图像。");
@@ -204,9 +231,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     }
     const count = () => target.section.querySelectorAll("#llm-file-context-list .llm-file-context-item").length;
     const expected = count() + 1;
-    const files = new win.DataTransfer();
-    files.items.add(new win.File([markdown], fileName, { type: "text/markdown" }));
-    target.input.dispatchEvent(new win.ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: files }));
+    attachFiles(target, [new win.File([markdown], fileName, { type: "text/markdown" })]);
     const deadline = Date.now() + 6000;
     while (isActive() && count() < expected && Date.now() < deadline) await Zotero.Promise.delay(50);
     if (count() < expected) throw new Error("原版输入栏未能添加画布上下文附件，请重试。");
@@ -214,18 +239,23 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
   }
 
   function open(command: Open) {
+    if (runtimeSwitch) throw new Error("请等运行时切换完成。");
     active?.close();
     const first = locate();
     if (!first) {
       throw new Error(conversationAt(container, itemID) ? "请先结束论文对话中的当前操作。" : "请先在 LLM for Zotero 中打开这篇文献的论文对话。");
     }
+    const openingKey = first.key;
+    let composerKey = openingKey;
+    let parents = command.continueMain ? [] : command.parents;
+    let restoreDraft: "switched" | "failed" | undefined;
     const css = html(doc, "style");
     css.textContent = styles;
     doc.documentElement.append(css);
     const head = html(doc, "div");
     head.className = "zcanvas-composer-head";
     const title = html(doc, "span");
-    const label = command.parents.length > 1 ? "汇聚" : command.parents.length ? "追问" : command.source ? "继续对话" : "论文对话";
+    const label = parents.length > 1 ? "汇聚" : parents.length ? "追问" : command.source ? "继续对话" : "论文对话";
     title.textContent = command.source ? `${label} · ${command.source}` : label;
     title.title = title.textContent;
     const dismiss = html(doc, "button");
@@ -248,7 +278,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
         button.type = "button";
         button.textContent = label;
         button.addEventListener("click", () => {
-          if (!current || pending) return;
+          if (!current || pending || runtimeSwitch) return;
           write(current.input, prompt);
           current.input.focus({ preventScroll: true });
         });
@@ -268,7 +298,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     const observe = new win.MutationObserver(schedule);
 
     function recordDraft() {
-      if (!current) return;
+      if (!current || runtimeSwitch) return;
       draft = current.input.value.slice(0, 20000);
       suggestions.hidden = Boolean(draft.trim());
       error.textContent = "";
@@ -281,7 +311,8 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       current.input.removeEventListener("input", recordDraft);
       current.section.removeEventListener("keydown", onKey, true);
       current.section.removeEventListener("click", onSend, true);
-      if (command.parents.length && current.input.isConnected && locate()?.key === current.key &&
+      current.chat.removeEventListener("click", onRuntimeClick, true);
+      if (parents.length && current.input.isConnected && locate()?.key === current.key &&
           current.input.value !== originalDraft) write(current.input, originalDraft);
       for (const [selector] of menus) {
         const menu = current.chat.querySelector<HTMLElement>(selector);
@@ -316,34 +347,44 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       closed(command.request, sent ? "" : draft);
     }
 
-    function assign(target: Target) {
+    function assign(target: Target, keepDraft = false) {
       current = target;
       current.section.setAttribute("data-zcanvas-composer", "");
       current.section.prepend(head);
       if (command.quote) head.after(quote);
-      if (command.parents.length) current.section.append(suggestions);
+      if (parents.length) current.section.append(suggestions);
       current.section.append(error);
       for (const [selector] of menus) current.chat.querySelector(selector)?.setAttribute("data-zcanvas-menu", "");
       current.input.addEventListener("input", recordDraft);
       current.section.addEventListener("keydown", onKey, true);
       current.section.addEventListener("click", onSend, true);
+      current.chat.addEventListener("click", onRuntimeClick, true);
       originalDraft = current.input.value;
-      if ((command.parents.length || !originalDraft) && originalDraft !== draft) write(current.input, draft);
+      if ((keepDraft || parents.length || !originalDraft) && originalDraft !== draft) write(current.input, draft);
       recordDraft();
       resize.observe(current.section);
       current.input.focus({ preventScroll: true });
     }
 
     function schedule() {
-      if (!live || layoutFrame) return;
+      if (!live || layoutFrame || runtimeSwitch) return;
       layoutFrame = win.requestAnimationFrame(() => {
         layoutFrame = 0;
+        if (runtimeSwitch) return;
         const next = locate();
         if (!next || !iframe.isConnected) return;
-        if (next.section !== current?.section || next.key !== current.key) {
-          detach();
-          assign(next);
+        if (next.key !== composerKey) {
+          cleanup();
+          return;
         }
+        if (next.input !== current?.input || next.section !== current.section || next.key !== current.key) {
+          detach();
+          assign(next, Boolean(restoreDraft));
+        } else if (restoreDraft && next.input.value !== draft) {
+          write(next.input, draft);
+        }
+        if (restoreDraft === "failed") error.textContent = "无法切换运行时，请重试。";
+        restoreDraft = undefined;
         const frame = iframe.getBoundingClientRect();
         const width = Math.min(370, frame.width - 16);
         if (width <= 0) return;
@@ -368,6 +409,37 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       });
     }
 
+    function onRuntimeClick(event: Event) {
+      const row = (event.target as Element | null)?.closest?.<HTMLElement>("#llm-runtime-menu button[data-runtime-system]");
+      const system = row?.dataset.runtimeSystem;
+      if (!system || row.getAttribute("aria-checked") !== "false" || !current ||
+          conversationAt(container, itemID)?.key !== current.key) return;
+      if (pending || runtimeSwitch) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      recordDraft();
+      const resume = (key?: number) => {
+        if (!live) return;
+        if (key !== undefined) {
+          composerKey = key;
+          parents = command.continueMain && key === openingKey ? [] : command.parents;
+        }
+        restoreDraft = key === undefined ? "failed" : "switched";
+        schedule();
+      };
+      runtimeSwitch = {
+        from: current.key, system, resume,
+        timer: win.setTimeout(() => {
+          clearRuntimeSwitch();
+          resume();
+        }, 8000),
+      };
+      // The native switch saves the outgoing input as that conversation's draft.
+      if (parents.length && current.input.value !== originalDraft) write(current.input, originalDraft);
+    }
+
     function watchSend(target: Target) {
       let attempts = 0;
       win.clearInterval(sendWatch);
@@ -380,6 +452,11 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
     function onSend(event: Event) {
       const target = current;
       if (!target || forwarding || !target.send.contains(event.target as Node)) return;
+      if (runtimeSwitch) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       if (conversationAt(container, itemID)?.key !== target.key) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -388,7 +465,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       }
       const text = target.input.value.trim();
       const nativeCommand = text.startsWith("/") || target.section.querySelector("#llm-command-row[data-active]");
-      if (!command.parents.length || nativeCommand) {
+      if (!parents.length || nativeCommand) {
         watchSend(target);
         return;
       }
@@ -401,7 +478,7 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
       }
       pending = true;
       const isActive = () => live && current === target;
-      void session.submitNativeBranch(command.parents, text.slice(0, 20000), command.quote, target.key, async (payload) => {
+      void session.submitNativeBranch(parents, text.slice(0, 20000), command.quote, target.key, async (payload) => {
         let addedQuotes = 0;
         let addedFile: string | undefined;
         const rollback = () => {
@@ -466,7 +543,10 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
 
     function closeOnHistoryNavigation(event: Event) {
       if (event.type === "keydown" && !["Enter", " "].includes((event as KeyboardEvent).key)) return;
-      if ((event.target as Element | null)?.closest?.(historyNavigation)) cleanup();
+      if ((event.target as Element | null)?.closest?.(historyNavigation)) {
+        cleanup();
+        clearRuntimeSwitch();
+      }
     }
 
     active = { request: command.request, close: cleanup };
@@ -573,6 +653,8 @@ export function nativeComposer(container: Element, iframe: HTMLIFrameElement, it
   return {
     open,
     summarize,
+    canSync,
+    dispose() { active?.close(); clearRuntimeSwitch(); },
     close(request?: string) { if (!request || active?.request === request) active?.close(); },
   };
 }
